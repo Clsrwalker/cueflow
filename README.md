@@ -2,24 +2,24 @@
 
 CueFlow is a mobile-first cloud-native conversation intelligence MVP for the CSCI 5411 term project.
 
-The app lets a user start a live conversation, send transcript chunks, receive lightweight AI cues, end the session, and view a structured summary and conversation history. The local demo will use deterministic mock AI so it does not require a microphone, STT provider, device integration, or external LLM key.
+A user starts a live conversation, sends transcript chunks, receives lightweight AI cue cards, ends the session, and views a structured conversation summary and conversation history. The demo uses deterministic mock AI, so it does not require a microphone, STT provider, external hardware, or external LLM key.
 
 ## Architecture Summary
 
-CueFlow is designed as a multi-tier cloud-native system:
+- Presentation tier: React + Vite mobile-first web client, hosted on S3 and CloudFront in AWS.
+- API and edge tier: API Gateway HTTP API for REST and API Gateway WebSocket API for real-time traffic.
+- Application tier: Lambda REST/WebSocket handlers, SQS-backed cue and summary workers, and AI provider abstraction.
+- Data tier: DynamoDB single-table metadata plus S3 transcript and summary objects.
+- Observability and DevOps tier: CloudWatch logs, metrics, dashboard, alarms, AWS CDK, and GitHub Actions.
 
-- Presentation tier: React + Vite mobile-first web client.
-- API / edge tier: REST and WebSocket contracts for conversation lifecycle and real-time transcript traffic.
-- Application tier: TypeScript serverless-style handlers, async cue and summary workers, and an AI provider abstraction.
-- Data tier: DynamoDB-style metadata records and S3-style transcript / summary object storage.
-- DevOps and observability tier: AWS CDK, GitHub Actions, structured logs, metrics, dashboard, and alarms.
+See [docs/architecture.md](docs/architecture.md) for the full design.
 
 ## Repository Layout
 
 ```text
 cueflow/
   frontend/   React/Vite mobile UI
-  backend/    REST, WebSocket, worker, storage, and observability code
+  backend/    REST, WebSocket, queue, worker, storage, and AI logic
   shared/     Shared domain types, key builders, and validation helpers
   infra/      AWS CDK infrastructure code
   docs/       Architecture, API, NFR, trade-off, Well-Architected, and demo docs
@@ -30,59 +30,133 @@ cueflow/
 ```bash
 npm install
 npm test
+npm run typecheck
 npm run build
+npm run synth
 ```
 
-Phase 1 initializes the project structure and shared domain foundation. Later phases will add the local REST/WebSocket runtime, mock async workers, full UI, CDK stacks, CI/CD, and detailed documentation.
+Run the local UI:
+
+```bash
+npm run dev --workspace @cueflow/frontend
+```
+
+Open `http://localhost:5174`.
+
+## Demo Steps
+
+1. Click Start Conversation.
+2. Click Replay Demo Transcript.
+3. Watch transcript chunks arrive.
+4. Watch AI cue cards appear.
+5. Click End Conversation.
+6. Wait for Conversation Summary.
+7. Click View History.
+
+The frontend includes a local real-time simulation so the demo works without cloud deployment.
 
 ## Environment Variables
 
-No environment variables are required for Phase 1.
+Local demo:
+- No required environment variables.
 
-Planned local variables:
+Frontend optional:
+- `VITE_CUEFLOW_API_BASE`: REST API base URL for a future deployed backend integration.
+- `VITE_CUEFLOW_WS_URL`: WebSocket URL for a future deployed backend integration.
 
-- `VITE_CUEFLOW_API_BASE`: optional frontend API base URL.
-- `CUEFLOW_STAGE`: deployment stage, for example `dev` or `staging`.
-- `CUEFLOW_AI_PROVIDER`: `mock` by default.
+Backend and infrastructure:
+- `CUEFLOW_STAGE`: deployment stage, for example `dev`.
+- `CUEFLOW_TABLE_NAME`: DynamoDB table name.
+- `CUEFLOW_DATA_BUCKET_NAME`: S3 data bucket name.
+- `CUEFLOW_CUE_QUEUE_URL`: SQS cue queue URL.
+- `CUEFLOW_SUMMARY_QUEUE_URL`: SQS summary queue URL.
 
-## Demo Flow
+GitHub Actions optional deploy:
+- `AWS_ROLE_ARN`: GitHub secret for OIDC role assumption.
+- `AWS_REGION`: GitHub variable, defaults to `us-east-1`.
 
-Planned MVP demo:
+Do not commit AWS credentials. Use local AWS CLI profile configuration for manual deploys.
 
-1. Start Conversation.
-2. Replay Demo Transcript or manually send transcript chunks.
-3. Watch transcript lines appear.
-4. Receive deterministic AI cue cards.
-5. End Conversation.
-6. View Conversation Summary and Conversation History.
+## Deployment
 
-## Deployment Plan
+Synthesize infrastructure:
 
-AWS deployment will be defined through CDK:
+```bash
+npm run synth
+```
 
-- S3 and CloudFront for frontend hosting.
-- API Gateway HTTP API and WebSocket API.
+Deploy when AWS credentials are configured:
+
+```bash
+cd infra
+npm run build
+cdk deploy --all --context stage=dev
+```
+
+The CDK app defines:
+- S3 frontend bucket and CloudFront distribution.
+- S3 data bucket.
+- API Gateway HTTP API.
+- API Gateway WebSocket API.
+- DynamoDB table.
+- SQS cue and summary queues with DLQs.
 - Lambda handlers and workers.
-- SQS queues and DLQs.
-- DynamoDB table for metadata and connection state.
-- S3 bucket for transcript and summary objects.
-- CloudWatch dashboard, logs, metrics, and alarms.
+- CloudWatch dashboard and alarms.
+
+## API Contract Summary
+
+REST:
+- `POST /conversations`
+- `GET /conversations`
+- `GET /conversations/{conversationId}`
+- `GET /conversations/{conversationId}/cues`
+- `POST /conversations/{conversationId}/end`
+- `GET /conversations/{conversationId}/summary`
+- `POST /demo/replay`
+
+WebSocket:
+- `$connect`
+- `$disconnect`
+- `sendTranscript`
+- `ping`
+- `clientAckCue`
+
+See [docs/api-contract.md](docs/api-contract.md).
+
+## Testing
+
+```bash
+npm test
+```
+
+Coverage includes shared validation, DynamoDB/S3 key builders, cue trigger policy, mock AI provider, REST handler, WebSocket handler, queue abstractions, cue worker, and summary worker.
+
+## CI/CD
+
+GitHub Actions runs:
+1. `npm ci`
+2. `npm test`
+3. `npm run typecheck`
+4. `npm run build`
+5. `npm run synth`
+
+On `main`, deploy runs only when `AWS_ROLE_ARN` is configured.
 
 ## Known Limitations
 
-- Phase 1 does not include a runnable backend or full frontend workflow yet.
-- The AI provider is not implemented in Phase 1.
-- AWS resources are not provisioned in Phase 1.
+- Lambda CDK resources currently use deployable placeholder handler code. The backend logic is implemented and tested, but a production deployment should add a bundling step that packages compiled backend handlers into Lambda assets.
+- Local UI uses an in-browser real-time simulation. It is ready for demo and can later be wired to deployed REST and WebSocket URLs.
+- Authentication is intentionally minimal for the MVP. A production version should add Cognito or a JWT authorizer and restrict CORS origins.
+- AWS integration tests are mocked locally to keep the course demo runnable without a permanent AWS environment.
 
 ## Future Work
 
-- Implement deterministic mock AI cue and summary generation.
-- Add local REST and WebSocket-compatible runtime.
-- Add CDK stacks and GitHub Actions CI/CD.
-- Add CloudWatch-style structured logs and metrics.
-- Add optional Bedrock/OpenAI-compatible AI provider.
+- Add a Lambda bundling pipeline for compiled backend handlers.
+- Add an optional Bedrock or OpenAI-compatible provider behind the existing AI interface.
+- Add user authentication and per-user authorization.
+- Add deployed frontend environment configuration for REST and WebSocket URLs.
+- Add cloud integration tests for a stable AWS account.
 
 ## AI-Generated Code Disclosure
 
-This project is being developed with AI-assisted coding support. All submitted application logic is intended to be original to this project and reviewed before use.
-
+This project was developed with AI-assisted coding support. The implementation is intended to be original to CueFlow and reviewed before submission.

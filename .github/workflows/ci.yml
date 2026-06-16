@@ -1,0 +1,83 @@
+name: CueFlow CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate:
+    name: Test, Build, Synth
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: CDK synth
+        run: npm run synth
+
+  deploy:
+    name: Optional CDK Deploy
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    env:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+    steps:
+      - name: Skip when AWS role is not configured
+        if: env.AWS_ROLE_ARN == ''
+        run: echo "AWS_ROLE_ARN is not configured. Skipping deploy."
+
+      - name: Checkout
+        if: env.AWS_ROLE_ARN != ''
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        if: env.AWS_ROLE_ARN != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Configure AWS credentials
+        if: env.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install
+        if: env.AWS_ROLE_ARN != ''
+        run: npm ci
+
+      - name: Build
+        if: env.AWS_ROLE_ARN != ''
+        run: npm run build
+
+      - name: Deploy CDK
+        if: env.AWS_ROLE_ARN != ''
+        run: npx cdk deploy --all --app "node infra/dist/index.js" --require-approval never

@@ -1,13 +1,10 @@
-# CueFlow Documentation Plan
+# CueFlow Documentation
 
-This directory will hold the final project documentation:
+Project documentation:
 
-- `architecture.md`
-- `api-contract.md`
-- `nfr.md`
-- `tradeoffs.md`
-- `well-architected.md`
-- `demo-script.md`
-
-Phase 1 only creates the documentation directory and plan. Full documentation will be completed in later phases.
-
+- [Architecture](architecture.md)
+- [API Contract](api-contract.md)
+- [Non-Functional Requirements](nfr.md)
+- [Trade-offs](tradeoffs.md)
+- [AWS Well-Architected Review](well-architected.md)
+- [Demo Script](demo-script.md)
