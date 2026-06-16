@@ -5,7 +5,14 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "synth": "npm run build && cdk synth --app \"node dist/index.js\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.259.0",
+    "constructs": "^10.6.0"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1127.0"
   }
 }
-

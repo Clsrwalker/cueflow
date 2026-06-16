@@ -1,0 +1,7 @@
+{
+  "app": "node dist/index.js",
+  "context": {
+    "stage": "dev",
+    "@aws-cdk/core:defaultCrossStackReferences": "strong"
+  }
+}
