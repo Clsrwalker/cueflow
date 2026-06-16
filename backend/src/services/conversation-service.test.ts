@@ -35,7 +35,7 @@ describe("ConversationService", () => {
     expect(conversations).toEqual([conversation]);
   });
 
-  test("appends transcript chunks, stores raw objects, and creates a ready summary when ending", async () => {
+  test("appends transcript chunks, ends conversations, and generates summaries on demand", async () => {
     const store = new InMemoryCueFlowStore();
     const service = fixedService(store);
     const conversation = await service.createConversation({ userId: "user_a" });
@@ -47,20 +47,27 @@ describe("ConversationService", () => {
       text: "We need to expose REST history and summary retrieval. The main risk is latency.",
       clientTimestamp: "2026-06-16T09:59:59.000Z",
     });
-    const result = await service.endConversation(conversation.conversationId);
+    const ended = await service.endConversation(conversation.conversationId);
 
     expect(storedChunk.s3Key).toBe("raw/conv_000001/chunks/000001.json");
-    expect(result.conversation).toMatchObject({
+    expect(ended.conversation).toMatchObject({
       status: "ENDED",
       endedAt: "2026-06-16T10:00:00.000Z",
+      summaryStatus: "PENDING",
+    });
+    expect(ended.transcriptObjectKey).toBe(fullTranscriptS3Key(conversation.conversationId));
+    await expect(service.getSummary(conversation.conversationId)).rejects.toBeInstanceOf(SummaryNotReadyError);
+
+    const generated = await service.generateSummary(conversation.conversationId);
+    expect(generated.conversation).toMatchObject({
       summaryStatus: "READY",
     });
-    expect(result.summary.summary).toContain("REST API lifecycle");
-    expect(result.summary.risks).toEqual(expect.arrayContaining(["The main risk is latency."]));
+    expect(generated.summary.summary).toContain("REST API lifecycle");
+    expect(generated.summary.risks).toEqual(expect.arrayContaining(["The main risk is latency."]));
     expect(store.getObjectForTest(fullTranscriptS3Key(conversation.conversationId))).toMatchObject({
       key: fullTranscriptS3Key(conversation.conversationId),
     });
-    await expect(service.getSummary(conversation.conversationId)).resolves.toEqual(result.summary);
+    await expect(service.getSummary(conversation.conversationId)).resolves.toEqual(generated.summary);
   });
 
   test("records cues and exposes them in created order", async () => {
@@ -115,7 +122,8 @@ describe("ConversationService", () => {
     });
     const conversation = await service.createConversation();
 
-    await expect(service.endConversation(conversation.conversationId)).rejects.toThrow("summary failed");
+    await service.endConversation(conversation.conversationId);
+    await expect(service.generateSummary(conversation.conversationId)).rejects.toThrow("summary failed");
     await expect(service.getConversation(conversation.conversationId)).resolves.toMatchObject({
       status: "ENDED",
       summaryStatus: "FAILED",

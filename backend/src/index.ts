@@ -2,7 +2,13 @@ export type {
   Conversation,
   ConversationSummary,
   Cue,
+  PongEvent,
+  SummaryReadyEvent,
+  TranscriptAckEvent,
   TranscriptChunk,
+  WebSocketClientAckCueMessage,
+  WebSocketConnection,
+  WebSocketPingMessage,
   WebSocketSendTranscriptMessage,
 } from "@cueflow/shared";
 
@@ -48,12 +54,14 @@ export {
   type ConversationServiceOptions,
   type CreateConversationInput,
   type EndConversationResult,
+  type GenerateSummaryResult,
   type ListConversationsInput,
   type RecordCueInput,
 } from "./services/conversation-service.js";
 
 export {
   createRestHandler,
+  type RestHandlerOptions,
   type RestRequest,
   type RestResponse,
 } from "./handlers/rest.js";
@@ -72,11 +80,19 @@ export {
   InMemoryCueJobQueue,
 } from "./queues/in-memory-cue-job-queue.js";
 
+export {
+  InMemorySummaryJobQueue,
+} from "./queues/in-memory-summary-job-queue.js";
+
 export type {
   CueJob,
   CueJobQueue,
   CueJobStatus,
+  SummaryJob,
+  SummaryJobQueue,
+  SummaryJobStatus,
   StoredCueJob,
+  StoredSummaryJob,
 } from "./queues/types.js";
 
 export {
@@ -99,6 +115,22 @@ export {
   type SendTranscriptResult,
   type WebSocketServiceOptions,
 } from "./websocket/websocket-service.js";
+
+export {
+  CueWorker,
+  type CueWorkerOptions,
+  type CueWorkerResult,
+} from "./workers/cue-worker.js";
+
+export {
+  SummaryWorker,
+  type SummaryWorkerResult,
+} from "./workers/summary-worker.js";
+
+export {
+  publishToConversationConnections,
+  type WorkerPushEvent,
+} from "./workers/event-publisher.js";
 
 export type {
   ConversationPatch,

@@ -3,6 +3,16 @@ import {
   ConversationServiceError,
   InvalidConversationInputError,
 } from "../services/conversation-service.js";
+import type { SummaryJobQueue } from "../queues/types.js";
+
+type Clock = () => Date;
+type IdFactory = () => string;
+
+export type RestHandlerOptions = {
+  summaryQueue?: SummaryJobQueue;
+  clock?: Clock;
+  idFactory?: IdFactory;
+};
 
 export type RestRequest = {
   body?: string | null;
@@ -94,6 +104,10 @@ function optionalString(input: Record<string, unknown>, field: string): string |
   return typeof value === "string" ? value : undefined;
 }
 
+function defaultIdFactory(): string {
+  return Math.random().toString(36).slice(2, 12);
+}
+
 function errorResponse(error: unknown): RestResponse {
   if (error instanceof ConversationServiceError) {
     return json(error.statusCode, {
@@ -112,7 +126,13 @@ function errorResponse(error: unknown): RestResponse {
   });
 }
 
-export function createRestHandler(service: ConversationService): (event: RestRequest) => Promise<RestResponse> {
+export function createRestHandler(
+  service: ConversationService,
+  options: RestHandlerOptions = {},
+): (event: RestRequest) => Promise<RestResponse> {
+  const clock = options.clock ?? (() => new Date());
+  const idFactory = options.idFactory ?? defaultIdFactory;
+
   return async (event: RestRequest): Promise<RestResponse> => {
     try {
       const route = routeParts(event);
@@ -155,7 +175,22 @@ export function createRestHandler(service: ConversationService): (event: RestReq
 
         if (route.method === "POST" && child === "end") {
           const result = await service.endConversation(conversationId);
-          return json(200, result);
+          const shouldEnqueueSummary = result.conversation.summaryStatus !== "READY"
+            && options.summaryQueue
+            && !(await options.summaryQueue.hasPendingSummaryJob(conversationId));
+          const summaryJob = shouldEnqueueSummary
+            ? await options.summaryQueue!.enqueueSummaryJob({
+                jobId: `summaryjob_${idFactory()}`,
+                conversationId,
+                enqueuedAt: clock().toISOString(),
+              })
+            : null;
+          return json(200, {
+            conversation: result.conversation,
+            transcriptObjectKey: result.transcriptObjectKey,
+            summaryJobEnqueued: Boolean(summaryJob),
+            summaryJob,
+          });
         }
 
         if (route.method === "GET" && child === "summary") {

@@ -46,6 +46,11 @@ export type RecordCueInput = {
 
 export type EndConversationResult = {
   conversation: Conversation;
+  transcriptObjectKey: string;
+};
+
+export type GenerateSummaryResult = {
+  conversation: Conversation;
   summary: ConversationSummary;
 };
 
@@ -205,7 +210,7 @@ export class ConversationService {
     const pending = await this.store.updateConversation(conversation.conversationId, {
       status: "ENDED",
       endedAt,
-      summaryStatus: "PENDING",
+      summaryStatus: conversation.summaryStatus === "READY" ? "READY" : "PENDING",
     });
 
     if (!pending) {
@@ -213,9 +218,26 @@ export class ConversationService {
     }
 
     const chunks = await this.store.listTranscriptChunks(conversation.conversationId);
+    const transcriptObjectKey = await this.store.putFullTranscript(conversation.conversationId, chunks);
+
+    return {
+      conversation: pending,
+      transcriptObjectKey,
+    };
+  }
+
+  async generateSummary(conversationId: string): Promise<GenerateSummaryResult> {
+    const conversation = await this.getConversation(conversationId);
+    await this.store.updateConversation(conversation.conversationId, {
+      status: "ENDED",
+      endedAt: conversation.endedAt ?? this.nowIso(),
+      summaryStatus: "PENDING",
+    });
+
+    const chunks = await this.store.listTranscriptChunks(conversation.conversationId);
     await this.store.putFullTranscript(conversation.conversationId, chunks);
 
-    const generated = await this.generateSummary(conversation.conversationId, chunks);
+    const generated = await this.generateSummaryContent(conversation.conversationId, chunks);
     const summary: ConversationSummary = {
       conversationId: conversation.conversationId,
       ...generated,
@@ -250,7 +272,7 @@ export class ConversationService {
     return this.clock().toISOString();
   }
 
-  private async generateSummary(conversationId: string, chunks: TranscriptChunk[]): Promise<SummaryProviderResult> {
+  private async generateSummaryContent(conversationId: string, chunks: TranscriptChunk[]): Promise<SummaryProviderResult> {
     try {
       return await this.aiProvider.generateSummary(chunks);
     } catch (error) {
