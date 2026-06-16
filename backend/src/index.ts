@@ -36,6 +36,39 @@ export {
   MockAiProvider,
 } from "./ai/mock-ai-provider.js";
 
+export {
+  DEFAULT_USER_ID,
+  ConversationClosedError,
+  ConversationNotFoundError,
+  ConversationService,
+  ConversationServiceError,
+  InvalidConversationInputError,
+  SummaryNotReadyError,
+  type AppendTranscriptChunkInput,
+  type ConversationServiceOptions,
+  type CreateConversationInput,
+  type EndConversationResult,
+  type ListConversationsInput,
+  type RecordCueInput,
+} from "./services/conversation-service.js";
+
+export {
+  createRestHandler,
+  type RestRequest,
+  type RestResponse,
+} from "./handlers/rest.js";
+
+export {
+  InMemoryCueFlowStore,
+} from "./storage/in-memory-store.js";
+
+export type {
+  ConversationPatch,
+  CueFlowStore,
+  MetadataStore,
+  ObjectStore,
+} from "./storage/types.js";
+
 export type {
   AiProvider,
   CueContextWindow,
