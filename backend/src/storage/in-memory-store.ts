@@ -1,4 +1,4 @@
-import type { Conversation, ConversationSummary, Cue, TranscriptChunk } from "@cueflow/shared";
+import type { Conversation, ConversationSummary, Cue, TranscriptChunk, WebSocketConnection } from "@cueflow/shared";
 import {
   fullTranscriptS3Key,
   rawChunkS3Key,
@@ -15,6 +15,7 @@ export class InMemoryCueFlowStore implements CueFlowStore {
   private readonly conversations = new Map<string, Conversation>();
   private readonly chunksByConversation = new Map<string, TranscriptChunk[]>();
   private readonly cuesByConversation = new Map<string, Cue[]>();
+  private readonly connectionsById = new Map<string, WebSocketConnection>();
   private readonly summaries = new Map<string, ConversationSummary>();
   private readonly objects = new Map<string, StoredObject>();
 
@@ -78,6 +79,31 @@ export class InMemoryCueFlowStore implements CueFlowStore {
     return (this.cuesByConversation.get(conversationId) ?? []).map((cue) => ({ ...cue }));
   }
 
+  async putConnection(connection: WebSocketConnection): Promise<WebSocketConnection> {
+    const copy = { ...connection };
+    this.connectionsById.set(connection.connectionId, copy);
+    return { ...copy };
+  }
+
+  async getConnection(connectionId: string): Promise<WebSocketConnection | null> {
+    const connection = this.connectionsById.get(connectionId);
+    return connection ? { ...connection } : null;
+  }
+
+  async deleteConnection(connectionId: string): Promise<WebSocketConnection | null> {
+    const connection = this.connectionsById.get(connectionId);
+    if (!connection) return null;
+    this.connectionsById.delete(connectionId);
+    return { ...connection };
+  }
+
+  async listConnections(conversationId: string): Promise<WebSocketConnection[]> {
+    return [...this.connectionsById.values()]
+      .filter((connection) => connection.conversationId === conversationId)
+      .sort((a, b) => a.connectedAt.localeCompare(b.connectedAt))
+      .map((connection) => ({ ...connection }));
+  }
+
   async putRawTranscriptChunk(chunk: TranscriptChunk): Promise<string> {
     const key = rawChunkS3Key(chunk.conversationId, chunk.chunkId);
     this.objects.set(key, {
@@ -128,4 +154,3 @@ export class InMemoryCueFlowStore implements CueFlowStore {
     return this.objects.get(key) ?? null;
   }
 }
-

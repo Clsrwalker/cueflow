@@ -59,8 +59,46 @@ export {
 } from "./handlers/rest.js";
 
 export {
+  createWebSocketHandler,
+  type WebSocketRequest,
+  type WebSocketResponse,
+} from "./handlers/websocket.js";
+
+export {
   InMemoryCueFlowStore,
 } from "./storage/in-memory-store.js";
+
+export {
+  InMemoryCueJobQueue,
+} from "./queues/in-memory-cue-job-queue.js";
+
+export type {
+  CueJob,
+  CueJobQueue,
+  CueJobStatus,
+  StoredCueJob,
+} from "./queues/types.js";
+
+export {
+  InMemoryWebSocketMessenger,
+} from "./websocket/messenger.js";
+
+export type {
+  SentWebSocketEvent,
+  WebSocketMessenger,
+} from "./websocket/messenger.js";
+
+export {
+  WebSocketConnectionNotFoundError,
+  WebSocketService,
+  WebSocketServiceError,
+  WebSocketValidationError,
+  toWebSocketServiceError,
+  type ClientAckCueResult,
+  type ConnectInput,
+  type SendTranscriptResult,
+  type WebSocketServiceOptions,
+} from "./websocket/websocket-service.js";
 
 export type {
   ConversationPatch,

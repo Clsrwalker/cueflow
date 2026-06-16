@@ -1,4 +1,4 @@
-import type { Conversation, ConversationSummary, Cue, TranscriptChunk } from "@cueflow/shared";
+import type { Conversation, ConversationSummary, Cue, TranscriptChunk, WebSocketConnection } from "@cueflow/shared";
 
 export type ConversationPatch = Partial<Pick<Conversation, "status" | "endedAt" | "cueCount" | "summaryStatus">>;
 
@@ -11,6 +11,10 @@ export type MetadataStore = {
   listTranscriptChunks(conversationId: string): Promise<TranscriptChunk[]>;
   putCue(cue: Cue): Promise<Cue>;
   listCues(conversationId: string): Promise<Cue[]>;
+  putConnection(connection: WebSocketConnection): Promise<WebSocketConnection>;
+  getConnection(connectionId: string): Promise<WebSocketConnection | null>;
+  deleteConnection(connectionId: string): Promise<WebSocketConnection | null>;
+  listConnections(conversationId: string): Promise<WebSocketConnection[]>;
 };
 
 export type ObjectStore = {
@@ -21,4 +25,3 @@ export type ObjectStore = {
 };
 
 export type CueFlowStore = MetadataStore & ObjectStore;
-

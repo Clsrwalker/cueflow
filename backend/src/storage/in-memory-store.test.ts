@@ -98,4 +98,28 @@ describe("InMemoryCueFlowStore", () => {
     expect(await store.listCues("c_001")).toEqual([cue]);
     expect(await store.getConversation("c_001")).toMatchObject({ cueCount: 1 });
   });
+
+  test("stores WebSocket connection records by conversation", async () => {
+    const store = new InMemoryCueFlowStore();
+
+    await store.putConnection({
+      connectionId: "conn_001",
+      conversationId: "c_001",
+      userId: "demo-user",
+      connectedAt: "2026-06-16T10:00:01.000Z",
+      ttl: 1780000000,
+    });
+    await store.putConnection({
+      connectionId: "conn_002",
+      conversationId: "c_002",
+      userId: "demo-user",
+      connectedAt: "2026-06-16T10:00:02.000Z",
+      ttl: 1780000000,
+    });
+
+    await expect(store.getConnection("conn_001")).resolves.toMatchObject({ conversationId: "c_001" });
+    await expect(store.listConnections("c_001")).resolves.toHaveLength(1);
+    await expect(store.deleteConnection("conn_001")).resolves.toMatchObject({ connectionId: "conn_001" });
+    await expect(store.listConnections("c_001")).resolves.toHaveLength(0);
+  });
 });

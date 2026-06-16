@@ -47,6 +47,14 @@ export type ConversationSummary = {
   createdAt: string;
 };
 
+export type WebSocketConnection = {
+  connectionId: string;
+  conversationId: string;
+  userId: string;
+  connectedAt: string;
+  ttl?: number;
+};
+
 export type WebSocketSendTranscriptMessage = {
   action: "sendTranscript";
   conversationId: string;
@@ -56,10 +64,25 @@ export type WebSocketSendTranscriptMessage = {
   clientTimestamp: string;
 };
 
+export type WebSocketPingMessage = {
+  action: "ping";
+};
+
+export type WebSocketClientAckCueMessage = {
+  action: "clientAckCue";
+  conversationId: string;
+  cueId: string;
+};
+
 export type TranscriptAckEvent = {
   eventType: "transcript.ack";
   conversationId: string;
   chunkId: string;
+  receivedAt: string;
+};
+
+export type PongEvent = {
+  eventType: "pong";
   receivedAt: string;
 };
 
@@ -78,4 +101,3 @@ export type SummaryReadyEvent = {
 export type ValidationResult<T> =
   | { ok: true; value: T }
   | { ok: false; errors: string[] };
-
