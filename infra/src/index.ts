@@ -15,6 +15,9 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 const app = new cdk.App();
 app.node.setContext("@aws-cdk/core:defaultCrossStackReferences", "strong");
 const stage = app.node.tryGetContext("stage") ?? "dev";
+const bootstrapless = app.node.tryGetContext("bootstrapless") === "true";
+const labRoleArn = app.node.tryGetContext("labRoleArn") as string | undefined;
+const skipFrontend = app.node.tryGetContext("skipFrontend") === "true";
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
   region: process.env.CDK_DEFAULT_REGION ?? "us-east-1",
@@ -22,6 +25,7 @@ const env = {
 
 type CueFlowStackProps = cdk.StackProps & {
   stage: string;
+  autoDeleteObjects?: boolean;
 };
 
 class StorageStack extends cdk.Stack {
@@ -69,7 +73,7 @@ class StorageStack extends cdk.Stack {
         },
       ],
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      autoDeleteObjects: props.autoDeleteObjects ?? true,
     });
 
     new cdk.CfnOutput(this, "CueFlowTableName", { value: this.table.tableName });
@@ -137,7 +141,7 @@ class FrontendHostingStack extends cdk.Stack {
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      autoDeleteObjects: props.autoDeleteObjects ?? true,
     });
 
     this.distribution = new cloudfront.Distribution(this, "FrontendDistribution", {
@@ -164,6 +168,7 @@ type ApiStackProps = CueFlowStackProps & {
   dataBucket: s3.Bucket;
   cueQueue: sqs.Queue;
   summaryQueue: sqs.Queue;
+  lambdaRoleArn?: string;
 };
 
 class ApiStack extends cdk.Stack {
@@ -187,23 +192,29 @@ class ApiStack extends cdk.Stack {
       NODE_OPTIONS: "--enable-source-maps",
     };
 
-    this.restHandler = this.lambdaFunction("RestHandler", "rest-handler", baseEnvironment);
-    this.webSocketHandler = this.lambdaFunction("WebSocketHandler", "websocket-handler", baseEnvironment);
-    this.cueWorker = this.lambdaFunction("CueWorker", "cue-worker", baseEnvironment);
-    this.summaryWorker = this.lambdaFunction("SummaryWorker", "summary-worker", baseEnvironment);
+    const lambdaRole = props.lambdaRoleArn
+      ? iam.Role.fromRoleArn(this, "LearnerLabLambdaRole", props.lambdaRoleArn, { mutable: false })
+      : undefined;
 
-    props.table.grantReadWriteData(this.restHandler);
-    props.table.grantReadWriteData(this.webSocketHandler);
-    props.table.grantReadWriteData(this.cueWorker);
-    props.table.grantReadWriteData(this.summaryWorker);
-    props.dataBucket.grantReadWrite(this.restHandler);
-    props.dataBucket.grantReadWrite(this.webSocketHandler);
-    props.dataBucket.grantReadWrite(this.cueWorker);
-    props.dataBucket.grantReadWrite(this.summaryWorker);
-    props.cueQueue.grantSendMessages(this.webSocketHandler);
-    props.cueQueue.grantConsumeMessages(this.cueWorker);
-    props.summaryQueue.grantSendMessages(this.restHandler);
-    props.summaryQueue.grantConsumeMessages(this.summaryWorker);
+    this.restHandler = this.lambdaFunction("RestHandler", "rest-handler", baseEnvironment, lambdaRole);
+    this.webSocketHandler = this.lambdaFunction("WebSocketHandler", "websocket-handler", baseEnvironment, lambdaRole);
+    this.cueWorker = this.lambdaFunction("CueWorker", "cue-worker", baseEnvironment, lambdaRole);
+    this.summaryWorker = this.lambdaFunction("SummaryWorker", "summary-worker", baseEnvironment, lambdaRole);
+
+    if (!lambdaRole) {
+      props.table.grantReadWriteData(this.restHandler);
+      props.table.grantReadWriteData(this.webSocketHandler);
+      props.table.grantReadWriteData(this.cueWorker);
+      props.table.grantReadWriteData(this.summaryWorker);
+      props.dataBucket.grantReadWrite(this.restHandler);
+      props.dataBucket.grantReadWrite(this.webSocketHandler);
+      props.dataBucket.grantReadWrite(this.cueWorker);
+      props.dataBucket.grantReadWrite(this.summaryWorker);
+      props.cueQueue.grantSendMessages(this.webSocketHandler);
+      props.cueQueue.grantConsumeMessages(this.cueWorker);
+      props.summaryQueue.grantSendMessages(this.restHandler);
+      props.summaryQueue.grantConsumeMessages(this.summaryWorker);
+    }
 
     this.restApi = new apigwv2.HttpApi(this, "RestApi", {
       apiName: `cueflow-rest-${props.stage}`,
@@ -257,14 +268,21 @@ class ApiStack extends cdk.Stack {
         }),
       ],
     });
-    this.cueWorker.addToRolePolicy(manageConnectionsPolicy);
-    this.summaryWorker.addToRolePolicy(manageConnectionsPolicy);
+    if (!lambdaRole) {
+      this.cueWorker.addToRolePolicy(manageConnectionsPolicy);
+      this.summaryWorker.addToRolePolicy(manageConnectionsPolicy);
+    }
 
     new cdk.CfnOutput(this, "RestApiUrl", { value: this.restApi.apiEndpoint });
     new cdk.CfnOutput(this, "WebSocketApiUrl", { value: this.webSocketStage.url });
   }
 
-  private lambdaFunction(id: string, functionName: string, environment: Record<string, string>): lambda.Function {
+  private lambdaFunction(
+    id: string,
+    functionName: string,
+    environment: Record<string, string>,
+    role?: iam.IRole,
+  ): lambda.Function {
     const physicalName = `cueflow-${functionName}-${stage}`;
     const logGroup = new logs.LogGroup(this, `${id}LogGroup`, {
       logGroupName: `/aws/lambda/${physicalName}`,
@@ -280,6 +298,7 @@ class ApiStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(20),
       logGroup,
       environment,
+      role,
       code: lambda.Code.fromInline(`
 exports.handler = async (event, context) => {
   console.log(JSON.stringify({
@@ -366,16 +385,24 @@ class MonitoringStack extends cdk.Stack {
   }
 }
 
-const stackProps = { env, stage };
+const stackProps: CueFlowStackProps = {
+  env,
+  stage,
+  autoDeleteObjects: !bootstrapless,
+  synthesizer: bootstrapless ? new cdk.BootstraplessSynthesizer() : undefined,
+};
 const storage = new StorageStack(app, `CueFlowStorage-${stage}`, stackProps);
 const queues = new QueueStack(app, `CueFlowQueues-${stage}`, stackProps);
-new FrontendHostingStack(app, `CueFlowFrontend-${stage}`, stackProps);
+if (!skipFrontend) {
+  new FrontendHostingStack(app, `CueFlowFrontend-${stage}`, stackProps);
+}
 const api = new ApiStack(app, `CueFlowApi-${stage}`, {
   ...stackProps,
   table: storage.table,
   dataBucket: storage.dataBucket,
   cueQueue: queues.cueQueue,
   summaryQueue: queues.summaryQueue,
+  lambdaRoleArn: labRoleArn,
 });
 new MonitoringStack(app, `CueFlowMonitoring-${stage}`, {
   ...stackProps,

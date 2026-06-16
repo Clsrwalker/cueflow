@@ -93,6 +93,22 @@ npm run build
 cdk deploy --all --context stage=dev
 ```
 
+AWS Academy Learner Lab may block CDK bootstrap IAM role creation. If the lab provides an existing `LabRole`, use:
+
+```bash
+cd infra
+npm run build
+cdk deploy --all --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --require-approval never
+```
+
+If the lab also blocks CloudFront, keep the frontend hosting stack for the architecture submission but skip that stack for the lab account:
+
+```bash
+cd infra
+npm run build
+cdk deploy --all --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context skipFrontend=true --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
+```
+
 The CDK app defines:
 - S3 frontend bucket and CloudFront distribution.
 - S3 data bucket.
