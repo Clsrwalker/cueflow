@@ -705,7 +705,8 @@ pre {
 
 .setting-choice,
 .setting-row,
-.switch-row {
+.switch-row,
+.setting-input-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -713,6 +714,28 @@ pre {
   width: 100%;
   padding: 0 20px;
   font-size: 16px;
+}
+
+.setting-input-row {
+  gap: 14px;
+}
+
+.setting-input-row span {
+  flex: 0 0 auto;
+}
+
+.setting-input-row input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #202020;
+  text-align: right;
+  outline: none;
+}
+
+.ai-provider-card .setting-row {
+  border-top: 1px solid #eeeeed;
 }
 
 .setting-row span:last-child {
@@ -852,9 +875,16 @@ pre {
   background: #38bd5b;
 }
 
-.live-content,
+.live-content {
+  height: calc(100vh - 350px);
+  min-height: 260px;
+  overflow: hidden;
+  padding-bottom: 0;
+  animation: pane-enter 160ms ease-out both;
+}
+
 .history-content {
-  height: calc(100vh - 258px);
+  height: calc(100vh - 252px);
   min-height: 260px;
   overflow: hidden;
   padding-bottom: 0;
@@ -884,6 +914,38 @@ pre {
   overflow-y: auto;
 }
 
+.conversation-page-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  min-height: 48px;
+  margin: 12px 0;
+  border-radius: 8px;
+  background: #dededd;
+  padding: 5px;
+}
+
+.conversation-page-tabs button {
+  min-width: 0;
+  border-radius: 6px;
+  color: #626262;
+  font-size: 15px;
+  transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.conversation-page-tabs button.active {
+  background: #fff;
+  color: #202020;
+}
+
+.conversation-page-tabs button:active {
+  transform: scale(0.98);
+}
+
+.conversation-page-tabs button:disabled {
+  opacity: 0.38;
+}
+
 .dual-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -895,10 +957,19 @@ pre {
 
 .workspace-side {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
   min-height: 0;
   overflow: hidden;
+}
+
+.conversation-prenote-page {
+  height: 100%;
+  overflow-y: auto;
+}
+
+.conversation-prenote-page .prenote-readonly {
+  min-height: 100%;
 }
 
 .cue-panel-card {
@@ -1263,7 +1334,7 @@ pre {
   }
 
   .workspace-side {
-    grid-template-rows: minmax(240px, auto) auto;
+    grid-template-rows: minmax(240px, auto);
     overflow: visible;
   }
 
@@ -1388,9 +1459,13 @@ pre {
     font-size: 14px;
   }
 
-  .live-content,
+  .live-content {
+    height: calc(100vh - 344px);
+    min-height: 420px;
+  }
+
   .history-content {
-    height: calc(100vh - 252px);
+    height: calc(100vh - 278px);
     min-height: 420px;
   }
 

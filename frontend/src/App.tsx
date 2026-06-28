@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 type Screen = "home" | "settings" | "prenoteManager" | "live" | "history" | "conversationSettings";
+type ConversationPage = "workspace" | "prenote";
 type CueCategory = "response" | "concept" | "suggestion" | "person";
 type SummaryStatus = "not_started" | "queued" | "running" | "ready" | "failed";
 type SpeechLanguage = "english" | "chinese" | "auto";
@@ -94,6 +95,26 @@ type ConversationSettings = {
   cueDuration: 5000 | 10000 | 15000 | "forever";
 };
 
+type AiCueJson = {
+  category?: CueCategory | "none";
+  confidence?: number;
+  title?: string;
+  output?: string;
+  reason?: string;
+};
+
+type AiSummaryJson = {
+  title?: string;
+  overview?: string;
+  keyPoints?: Array<{
+    title?: string;
+    details?: string[];
+  }>;
+  actionItems?: Array<{
+    text?: string;
+  }> | string[];
+};
+
 type AuthUser = {
   name: string;
   email: string;
@@ -145,6 +166,10 @@ type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["concept", "response", "suggestion", "person"];
 const AUTH_STORAGE_KEY = "cueflow.authUser";
+const OPENAI_KEY_STORAGE_KEY = "cueflow.openAiApiKey";
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const DEFAULT_AI_MODEL = "gpt-5.4-nano";
+const DEFAULT_SUMMARY_MODEL = "gpt-5.5";
 
 const DEFAULT_SETTINGS: ConversationSettings = {
   language: "english",
@@ -344,71 +369,23 @@ function words(value: string): number {
   return value.match(/[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g)?.length ?? 0;
 }
 
+function cjkCharacters(value: string): number {
+  return value.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+}
+
+function meaningfulLength(value: string): number {
+  return words(value) + Math.floor(cjkCharacters(value) / 2) + Math.floor(value.trim().length / 30);
+}
+
+function hasQuestionOrRequest(value: string): boolean {
+  return /[?？]/.test(value)
+    || /\b(what|why|how|should|can|could|would|explain|tell me|help|need|next)\b/i.test(value)
+    || /(什么|为什么|怎么|如何|是否|可以|需要|应该|解释|怎么办|下一步)/.test(value);
+}
+
 function promptContextFromPrenote(prenote: Prenote | null): string {
   if (!prenote) return "";
   return `Prepared context: ${prenote.title}\n${prenote.text}`.trim();
-}
-
-function buildCue(lines: TranscriptLine[], prenote: Prenote | null): AiCue {
-  const text = lines.map((line) => line.text).join(" ");
-  const promptContext = promptContextFromPrenote(prenote);
-  const lower = `${promptContext}\n${text}`.toLowerCase();
-  const id = `cue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-  const createdAt = new Date().toISOString();
-  const contextLead = prenote ? `Using "${prenote.title}" as prepared context, ` : "";
-
-  if (/\b(risk|failure|latency|cost|security|reliability|slow)\b/.test(lower)) {
-    return {
-      id,
-      category: "suggestion",
-      title: "Risk to address",
-      output: `${contextLead}the conversation is surfacing operational risk. Capture the mitigation before the topic moves on.`,
-      createdAt,
-      source: "auto",
-    };
-  }
-
-  if (/\b(should|next|todo|need to|action|follow up)\b/.test(lower)) {
-    return {
-      id,
-      category: "response",
-      title: "Possible next response",
-      output: `${contextLead}ask for the owner, timeline, and expected outcome so this becomes a concrete action item.`,
-      createdAt,
-      source: "auto",
-    };
-  }
-
-  if (/\b(websocket|sqs|dynamodb|s3|lambda|cloud|architecture|api)\b/.test(lower)) {
-    return {
-      id,
-      category: "concept",
-      title: "Architecture concept",
-      output: `${contextLead}separate live ingestion, durable storage, and AI processing so each cloud component has one clear responsibility.`,
-      createdAt,
-      source: "auto",
-    };
-  }
-
-  if (prenote) {
-    return {
-      id,
-      category: "concept",
-      title: "Use prepared context",
-      output: `Use "${prenote.title}" as the prompt context for the next answer: ${prenote.text.slice(0, 140)}`,
-      createdAt,
-      source: "auto",
-    };
-  }
-
-  return {
-    id,
-    category: "response",
-    title: "Follow-up prompt",
-    output: "Ask a short clarifying question and keep the conversation moving.",
-    createdAt,
-    source: "auto",
-  };
 }
 
 function shouldGenerateCue(lines: TranscriptLine[], cues: AiCue[], prenote: Prenote | null): boolean {
@@ -416,65 +393,317 @@ function shouldGenerateCue(lines: TranscriptLine[], cues: AiCue[], prenote: Pren
   const recent = lastCue ? lines.slice(-3) : lines.slice(-2);
   const text = recent.map((line) => line.text).join(" ");
   const contextText = promptContextFromPrenote(prenote);
-  return words(text) >= 18
-    || Boolean(prenote && words(text) >= 8)
-    || /[?]/.test(text)
+  return meaningfulLength(text) >= 12
+    || Boolean(prenote && meaningfulLength(text) >= 5)
+    || hasQuestionOrRequest(text)
     || /\b(risk|should|decision|latency|cloud|api|next)\b/i.test(`${contextText}\n${text}`);
 }
 
-function buildSummary(record: Pick<ConversationRecord, "title" | "transcript" | "cueHistory" | "usedPrenote">): ConversationSummary {
-  const text = record.transcript.map((line) => line.text).join(" ");
-  const promptContext = promptContextFromPrenote(record.usedPrenote ?? null);
-  const lower = `${promptContext}\n${text}`.toLowerCase();
-  const keyPoints: ConversationSummaryKeyPoint[] = [];
-  if (record.usedPrenote) {
-    keyPoints.push({
-      id: "kp-prenote",
-      title: "Prepared context used",
-      details: [`Prompt context came from "${record.usedPrenote.title}".`],
-    });
+function configuredAiEndpoint(): string {
+  return import.meta.env.VITE_CUEFLOW_AI_ENDPOINT?.trim() ?? "";
+}
+
+function configuredOpenAiKey(): string {
+  const buildKey = import.meta.env.VITE_OPENAI_API_KEY?.trim();
+  if (buildKey) return buildKey;
+  return storedOpenAiKey();
+}
+
+function storedOpenAiKey(): string {
+  try {
+    return window.localStorage.getItem(OPENAI_KEY_STORAGE_KEY)?.trim() ?? "";
+  } catch {
+    return "";
   }
-  if (/\b(websocket|live|real-time|transcript)\b/.test(lower)) {
-    keyPoints.push({
-      id: "kp-live",
-      title: "Live conversation flow",
-      details: ["Transcript is captured inside the session page.", "AI cue generation follows the live transcript context."],
-    });
+}
+
+function persistOpenAiKey(value: string): void {
+  try {
+    const trimmed = value.trim();
+    if (trimmed) window.localStorage.setItem(OPENAI_KEY_STORAGE_KEY, trimmed);
+    else window.localStorage.removeItem(OPENAI_KEY_STORAGE_KEY);
+  } catch {
+    // Browsers can deny localStorage in private modes; calls will still fail clearly.
   }
-  if (/\b(sqs|queue|async|latency|worker)\b/.test(lower)) {
-    keyPoints.push({
-      id: "kp-async",
-      title: "Async AI processing",
-      details: ["AI work should not block transcript ingestion.", "Queue retries help keep the system resilient."],
-    });
+}
+
+function aiModel(defaultModel = DEFAULT_AI_MODEL): string {
+  return import.meta.env.VITE_OPENAI_MODEL?.trim() || defaultModel;
+}
+
+function transcriptText(lines: TranscriptLine[]): string {
+  return lines.map((line) => `[${line.time}] ${line.text}`).join("\n").trim();
+}
+
+function cueHistoryText(cues: AiCue[]): string {
+  return cues.map((cue) => `[${cue.category}] ${cue.title}: ${cue.output}`).join("\n").trim();
+}
+
+function cleanOneLine(value: unknown, max: number): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function cleanParagraph(value: unknown, max: number): string {
+  return String(value ?? "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, max);
+}
+
+function extractJsonObject(text: string): string {
+  const cleaned = text.replace(/```json\n?/gi, "").replace(/```\n?/g, "").trim();
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  return firstBrace >= 0 && lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
+}
+
+function extractResponseText(data: unknown): string {
+  const response = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  if (typeof response.output_text === "string") return response.output_text.trim();
+
+  const texts: string[] = [];
+  const output = Array.isArray(response.output) ? response.output : [];
+  for (const item of output) {
+    const content = item && typeof item === "object" && Array.isArray((item as Record<string, unknown>).content)
+      ? (item as { content: unknown[] }).content
+      : [];
+    for (const contentItem of content) {
+      if (contentItem && typeof contentItem === "object") {
+        const text = (contentItem as Record<string, unknown>).text;
+        if (typeof text === "string") texts.push(text);
+      }
+    }
   }
-  if (/\b(s3|dynamodb|storage|history|summary)\b/.test(lower)) {
-    keyPoints.push({
-      id: "kp-storage",
-      title: "Durable history",
-      details: ["Keep session metadata queryable and preserve transcript text for review."],
-    });
+  return texts.join("\n").trim();
+}
+
+function parseAiJson<T>(text: string, label: string): T {
+  const jsonText = extractJsonObject(text);
+  try {
+    return JSON.parse(jsonText) as T;
+  } catch {
+    throw new Error(`${label} response was not valid JSON.`);
+  }
+}
+
+async function requestAiEndpoint<T>(path: "cue" | "summary", payload: unknown): Promise<T | null> {
+  const endpoint = configuredAiEndpoint();
+  if (!endpoint) return null;
+  const response = await fetch(`${endpoint.replace(/\/+$/, "")}/${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(`AI endpoint failed (${response.status}).`);
+  const data = await response.json() as Record<string, unknown>;
+  return (data[path] ?? data.data ?? data) as T;
+}
+
+async function requestOpenAiJson<T>(params: {
+  label: string;
+  system: string;
+  prompt: string;
+  model?: string;
+  maxOutputTokens: number;
+  temperature?: number | null;
+}): Promise<T> {
+  const apiKey = configuredOpenAiKey();
+  if (!apiKey) {
+    throw new Error("OpenAI API key is not configured.");
   }
 
-  const actionItems = record.transcript
-    .filter((line) => /\b(should|need to|next|todo|follow up|action)\b/i.test(line.text))
-    .slice(0, 4)
-    .map((line, index) => ({ id: `act-${index}`, text: line.text, checked: index === 0 }));
+  const system = [
+    params.system,
+    "Return valid JSON only. Do not include markdown, explanation, or extra text.",
+  ].join("\n\n");
+  const body: Record<string, unknown> = {
+    model: params.model ?? aiModel(),
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: `${system}\n\n${params.prompt}`,
+          },
+        ],
+      },
+    ],
+    max_output_tokens: params.maxOutputTokens,
+  };
+  if (params.temperature !== null) {
+    body.temperature = params.temperature ?? 0.05;
+  }
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(`OpenAI request failed (${response.status}).`);
+  }
+
+  const data = await response.json();
+  return parseAiJson<T>(extractResponseText(data), params.label);
+}
+
+function buildCuePrompt(lines: TranscriptLine[], prenote: Prenote | null, settings: ConversationSettings): string {
+  const recentTranscript = transcriptText(lines.slice(-8));
+  const triggerWindow = transcriptText(lines.slice(-3));
+  return [
+    `Settings: language=${settings.language}; autoCue=${settings.autoCue ? "on" : "off"}`,
+    prenote
+      ? `Selected prenote, use only if directly relevant:\n${prenote.title}\n${prenote.text.trim().slice(0, 2500)}`
+      : "",
+    recentTranscript ? `Recent transcript:\n${recentTranscript.slice(-2200)}` : "",
+    `Trigger window:\n${triggerWindow || "-"}`,
+  ].filter(Boolean).join("\n\n");
+}
+
+function normalizeAiCue(value: AiCueJson): AiCue | null {
+  const category = value.category;
+  if (!category || category === "none") return null;
+  if (!CUE_CATEGORY_ORDER.includes(category)) return null;
+  const title = cleanOneLine(value.title, 64);
+  const output = cleanParagraph(value.output, 900);
+  if (!title || !output) return null;
+
+  return {
+    id: `cue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    category,
+    title,
+    output,
+    createdAt: new Date().toISOString(),
+    source: "auto",
+  };
+}
+
+async function requestAiCue(lines: TranscriptLine[], prenote: Prenote | null, settings: ConversationSettings): Promise<AiCue | null> {
+  const prompt = buildCuePrompt(lines, prenote, settings);
+  const payload = { prompt, transcript: transcriptText(lines), prenote, settings };
+  const endpointResult = await requestAiEndpoint<AiCueJson>("cue", payload);
+  const raw = endpointResult ?? await requestOpenAiJson<AiCueJson>({
+    label: "Cue",
+    model: aiModel(DEFAULT_AI_MODEL),
+    maxOutputTokens: 500,
+    temperature: 0.05,
+    system: [
+      "You are CueFlow's high-precision automatic cue generator for live conversations.",
+      "Create one useful cue for the latest transcript window.",
+      "Prefer category response for a direct question or request.",
+      "Use category concept for a useful knowledge point, suggestion for a concrete next step or trade-off, person for explicit people/role details, and none only for noise or weak context.",
+      "Use selected prenote as background only when directly relevant. Do not invent facts outside the transcript.",
+      'Return exactly one JSON object: { "category": "response|concept|suggestion|person|none", "confidence": 0.0, "title": "...", "output": "...", "reason": "..." }',
+    ].join("\n"),
+    prompt,
+  });
+  return normalizeAiCue(raw);
+}
+
+function buildSummaryPrompt(record: Pick<ConversationRecord, "title" | "transcript" | "cueHistory" | "usedPrenote">, language: SpeechLanguage): string {
+  return [
+    "You generate post-conversation summaries for CueFlow.",
+    "",
+    "Fact boundaries:",
+    "- Transcript final lines are the primary facts. Summary claims must be grounded in transcript lines.",
+    "- AI cue history is not conversation fact. It only shows what the assistant suggested during the conversation.",
+    "- Prepared notes are background material. They may be useful context, but they were not necessarily discussed.",
+    "- Do not claim cue history or prepared note content happened unless the transcript supports it.",
+    "",
+    'Return exactly one JSON object: { "title": "short conversation title", "overview": "one paragraph summary", "keyPoints": [{ "title": "short key point title", "details": ["supporting detail from transcript"] }], "actionItems": [{ "text": "concrete follow-up action if any" }] }',
+    "",
+    "Rules:",
+    "- title: concise and specific.",
+    "- overview: one useful paragraph.",
+    "- keyPoints: group the main topics. Each detail should be grounded in transcript evidence.",
+    "- actionItems: only include explicit or strongly implied follow-ups. Use [] if none.",
+    `- Preferred language: ${language}.`,
+    "",
+    `Conversation title: ${record.title}`,
+    "",
+    "Transcript final lines:",
+    transcriptText(record.transcript) || "-",
+    "",
+    cueHistoryText(record.cueHistory) ? `AI cue history, non-factual assistant suggestions:\n${cueHistoryText(record.cueHistory)}` : "AI cue history: none",
+    "",
+    record.usedPrenote?.text.trim() ? `Prepared note background, not conversation fact:\n${record.usedPrenote.title}\n${record.usedPrenote.text}` : "Prepared note background: none",
+  ].join("\n");
+}
+
+function normalizeAiSummary(value: AiSummaryJson, fallbackTitle: string): ConversationSummary {
+  const title = cleanOneLine(value.title, 120) || fallbackTitle;
+  const overview = cleanParagraph(value.overview, 2200);
+  if (!overview) throw new Error("Summary overview is required.");
+
+  const keyPoints = Array.isArray(value.keyPoints) ? value.keyPoints : [];
+  const actionItems = Array.isArray(value.actionItems) ? value.actionItems : [];
 
   return {
     status: "ready",
-    title: record.title,
-    overview: text
-      ? `This session covered ${(keyPoints.length ? keyPoints : [{ title: "conversation context" }]).map((point) => point.title).slice(0, 3).join(", ")}.`
-      : "This session did not contain enough transcript content for a detailed summary.",
-    keyPoints: keyPoints.length ? keyPoints : [
-      { id: "kp-empty", title: "Conversation context", details: ["No major themes were detected yet."] },
-    ],
-    actionItems: actionItems.length ? actionItems : [
-      { id: "act-review", text: "Review the transcript and choose the next follow-up.", checked: false },
-    ],
-    emptyReason: text ? undefined : "too_short",
+    title,
+    overview,
+    keyPoints: keyPoints
+      .map((item, index) => ({
+        id: `kp-${Date.now().toString(36)}-${index}`,
+        title: cleanOneLine(item?.title, 140),
+        details: Array.isArray(item?.details)
+          ? item.details.map((detail) => cleanParagraph(detail, 600)).filter(Boolean).slice(0, 8)
+          : [],
+      }))
+      .filter((item) => item.title)
+      .slice(0, 12),
+    actionItems: actionItems
+      .map((item, index) => ({
+        id: `act-${Date.now().toString(36)}-${index}`,
+        text: typeof item === "string" ? cleanOneLine(item, 240) : cleanOneLine(item?.text, 240),
+        checked: false,
+      }))
+      .filter((item) => item.text)
+      .slice(0, 20),
     generatedAt: new Date().toISOString(),
+  };
+}
+
+async function requestAiSummary(record: ConversationRecord, language: SpeechLanguage): Promise<ConversationSummary> {
+  const transcript = transcriptText(record.transcript);
+  if (!transcript) {
+    return {
+      status: "ready",
+      title: record.title,
+      overview: "This conversation was too short for a detailed AI summary.",
+      keyPoints: [],
+      actionItems: [],
+      emptyReason: "too_short",
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  const prompt = buildSummaryPrompt(record, language);
+  const payload = { prompt, record, language };
+  const endpointResult = await requestAiEndpoint<AiSummaryJson>("summary", payload);
+  const raw = endpointResult ?? await requestOpenAiJson<AiSummaryJson>({
+    label: "Summary",
+    model: aiModel(DEFAULT_SUMMARY_MODEL),
+    maxOutputTokens: 1200,
+    temperature: null,
+    system: [
+      "You create CueFlow conversation summaries.",
+      "Ground summaries in transcript facts. Use prepared notes only as background context.",
+    ].join("\n"),
+    prompt,
+  });
+  return normalizeAiSummary(raw, record.title);
+}
+
+function queuedSummary(title: string, status: SummaryStatus = "queued", error?: string): ConversationSummary {
+  return {
+    status,
+    title,
+    overview: status === "failed" ? "AI summary generation failed." : "AI summary is being generated...",
+    keyPoints: [],
+    actionItems: [],
+    error,
   };
 }
 
@@ -491,10 +720,13 @@ export default function App() {
   const [isAccountOpen, setIsAccountOpen] = useState(false);
   const [accountDraft, setAccountDraft] = useState({ name: "", email: "" });
   const [screen, setScreen] = useState<Screen>("home");
+  const [livePage, setLivePage] = useState<ConversationPage>("workspace");
+  const [historyPage, setHistoryPage] = useState<ConversationPage>("workspace");
   const [settings, setSettings] = useState<ConversationSettings>(DEFAULT_SETTINGS);
   const [records, setRecords] = useState<ConversationRecord[]>(SAMPLE_RECORDS);
   const [prenotes, setPrenotes] = useState<Prenote[]>(SAMPLE_PRENOTES);
   const [prenoteDraft, setPrenoteDraft] = useState<PrenoteDraft>({ title: "", text: "" });
+  const [openAiKeyDraft, setOpenAiKeyDraft] = useState(() => storedOpenAiKey());
   const [cues, setCues] = useState<AiCue[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [activeRecordId, setActiveRecordId] = useState<string>("");
@@ -520,6 +752,7 @@ export default function App() {
   const transcriptRef = useRef<TranscriptLine[]>([]);
   const cuesRef = useRef<AiCue[]>([]);
   const cueTimerRef = useRef<number | null>(null);
+  const cueInFlightRef = useRef(false);
   const recordPointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const skipNextRecordClickRef = useRef(false);
 
@@ -676,16 +909,43 @@ export default function App() {
   }
 
   function maybeQueueCue(nextTranscript: TranscriptLine[]) {
-    if (!settings.autoCue || cueTimerRef.current || !shouldGenerateCue(nextTranscript, cuesRef.current, activePrenote)) return;
-    setConnectionStatus("cue queued");
+    if (
+      !settings.autoCue
+      || cueTimerRef.current
+      || cueInFlightRef.current
+      || !shouldGenerateCue(nextTranscript, cuesRef.current, activePrenote)
+    ) return;
+    const transcriptSnapshot = nextTranscript.slice(-8);
+    const prenoteSnapshot = activePrenote;
+    const settingsSnapshot = settings;
+    setConnectionStatus("ai cue queued");
     cueTimerRef.current = window.setTimeout(() => {
-      const cue = buildCue(nextTranscript.slice(-4), activePrenote);
-      const nextCues = [cue, ...cuesRef.current];
-      cuesRef.current = nextCues;
-      setCues(nextCues);
-      setConnectionStatus(isListening ? "listening" : "paused");
       cueTimerRef.current = null;
-    }, 650);
+      void generateCueForTranscript(transcriptSnapshot, prenoteSnapshot, settingsSnapshot);
+    }, 350);
+  }
+
+  async function generateCueForTranscript(lines: TranscriptLine[], prenote: Prenote | null, conversationSettings: ConversationSettings) {
+    if (!activeConversationIdRef.current) return;
+    cueInFlightRef.current = true;
+    setConnectionStatus("generating ai cue");
+    try {
+      const cue = await requestAiCue(lines, prenote, conversationSettings);
+      if (!activeConversationIdRef.current) return;
+      if (cue) {
+        const nextCues = [cue, ...cuesRef.current].slice(0, 20);
+        cuesRef.current = nextCues;
+        setCues(nextCues);
+        setConnectionStatus(shouldListenRef.current ? "listening" : "paused");
+      } else {
+        setConnectionStatus(shouldListenRef.current ? "listening" : "no cue needed");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setConnectionStatus(message.includes("not configured") ? "ai key missing" : "ai cue failed");
+    } finally {
+      cueInFlightRef.current = false;
+    }
   }
 
   function togglePrenote(id: string) {
@@ -774,6 +1034,11 @@ export default function App() {
     persistUser(nextUser);
   }
 
+  function saveOpenAiKey() {
+    persistOpenAiKey(openAiKeyDraft);
+    setConnectionStatus(openAiKeyDraft.trim() ? "ai key saved" : "ai key removed");
+  }
+
   function signOut() {
     if (activeConversationIdRef.current) {
       stopRecognition("signed out");
@@ -802,6 +1067,7 @@ export default function App() {
     transcriptRef.current = [];
     cuesRef.current = [];
     setIsListening(true);
+    setLivePage("workspace");
     setScreen("live");
     startRecognition();
   }
@@ -819,27 +1085,38 @@ export default function App() {
       startedAt: formatRecordDate(startedAt),
       location: "CueFlow",
       duration: elapsedLabel(elapsedSeconds),
-      summary: {
-        status: "queued",
-        title,
-        overview: "AI summary is being generated...",
-        keyPoints: [],
-        actionItems: [],
-      },
+      summary: queuedSummary(title),
       transcript: finalTranscript,
       cueHistory: finalCues,
       usedPrenote: activePrenote ?? undefined,
     };
-    const readyRecord = {
-      ...draftRecord,
-      summary: buildSummary(draftRecord),
-    };
-    setRecords((current) => [readyRecord, ...current.filter((record) => record.id !== readyRecord.id)]);
-    setActiveRecordId(readyRecord.id);
+    setRecords((current) => [draftRecord, ...current.filter((record) => record.id !== draftRecord.id)]);
+    setActiveRecordId(draftRecord.id);
     setActiveConversationId(null);
     activeConversationIdRef.current = null;
     setConnectionStatus("ready");
+    setHistoryPage("workspace");
     setScreen("history");
+    void generateSummaryForRecord(draftRecord);
+  }
+
+  async function generateSummaryForRecord(record: ConversationRecord) {
+    setRecords((current) => current.map((item) => (
+      item.id === record.id ? { ...item, summary: queuedSummary(record.title, "running") } : item
+    )));
+    try {
+      const summary = await requestAiSummary(record, settings.language);
+      setRecords((current) => current.map((item) => (
+        item.id === record.id
+          ? { ...item, title: summary.title || item.title, summary: { ...summary, title: summary.title || item.title } }
+          : item
+      )));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRecords((current) => current.map((item) => (
+        item.id === record.id ? { ...item, summary: queuedSummary(record.title, "failed", message) } : item
+      )));
+    }
   }
 
   function togglePauseConversation() {
@@ -859,6 +1136,7 @@ export default function App() {
       return;
     }
     setSelectedCueDetail(null);
+    setHistoryPage("workspace");
     setActiveRecordId(id);
     setScreen("history");
   }
@@ -1113,6 +1391,25 @@ export default function App() {
             </button>
           </div>
         </section>
+        <section className="settings-section">
+          <h2>AI Provider</h2>
+          <div className="setting-card ai-provider-card">
+            <label className="setting-input-row">
+              <span>OpenAI API key</span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={openAiKeyDraft}
+                placeholder={configuredAiEndpoint() ? "Backend endpoint configured" : "sk-..."}
+                onChange={(event) => setOpenAiKeyDraft(event.target.value)}
+              />
+            </label>
+            <button className="setting-row" type="button" onClick={saveOpenAiKey}>
+              <span>Save AI key</span>
+              <span>{configuredAiEndpoint() ? "Endpoint" : openAiKeyDraft.trim() || configuredOpenAiKey() ? "Ready" : "Missing"} <ChevronRight size={25} /></span>
+            </button>
+          </div>
+        </section>
       </main>
     );
   }
@@ -1157,8 +1454,9 @@ export default function App() {
           </div>
           <span className="live-duration"><span />{elapsedLabel(elapsedSeconds)}</span>
         </section>
+        {renderConversationPages(livePage, setLivePage, Boolean(activePrenote))}
         <section className="live-content">
-          {renderLiveWorkspace(cues, transcript, activePrenote)}
+          {livePage === "workspace" ? renderLiveWorkspace(cues, transcript) : renderPrenotePage(activePrenote)}
         </section>
         <footer className="live-actions">
           <button onClick={togglePauseConversation}>
@@ -1187,8 +1485,9 @@ export default function App() {
           </div>
           <span>{activeRecord.duration}</span>
         </section>
+        {renderConversationPages(historyPage, setHistoryPage, Boolean(activeRecord.usedPrenote))}
         <section className="history-content">
-          {renderHistoryWorkspace(activeRecord, setSelectedCueDetail)}
+          {historyPage === "workspace" ? renderHistoryWorkspace(activeRecord, setSelectedCueDetail) : renderPrenotePage(activeRecord.usedPrenote || null)}
         </section>
         {selectedCueDetail && renderCueDetailModal(selectedCueDetail, () => setSelectedCueDetail(null))}
       </main>
@@ -1332,13 +1631,30 @@ export default function App() {
   );
 }
 
-function renderLiveWorkspace(cues: AiCue[], transcript: TranscriptLine[], activePrenote: Prenote | null) {
+function renderConversationPages(active: ConversationPage, onChange: (page: ConversationPage) => void, hasPrenote: boolean) {
+  return (
+    <nav className="conversation-page-tabs" aria-label="Conversation pages">
+      <button className={active === "workspace" ? "active" : ""} type="button" onClick={() => onChange("workspace")}>
+        Workspace
+      </button>
+      <button
+        className={active === "prenote" ? "active" : ""}
+        type="button"
+        disabled={!hasPrenote}
+        onClick={() => onChange("prenote")}
+      >
+        Prepared Notes
+      </button>
+    </nav>
+  );
+}
+
+function renderLiveWorkspace(cues: AiCue[], transcript: TranscriptLine[]) {
   return (
     <div className="dual-workspace live-workspace">
       {renderCuePanel(cues)}
       <div className="workspace-side">
         {renderTranscript(transcript, true, "Transcript")}
-        {activePrenote && renderPrenote(activePrenote)}
       </div>
     </div>
   );
@@ -1350,7 +1666,6 @@ function renderHistoryWorkspace(record: ConversationRecord, onCueSelect: (cue: A
       {renderSummary(record, onCueSelect)}
       <div className="workspace-side">
         {renderTranscript(record.transcript, false, "Transcript")}
-        {record.usedPrenote && renderPrenote(record.usedPrenote)}
       </div>
     </div>
   );
@@ -1359,7 +1674,7 @@ function renderHistoryWorkspace(record: ConversationRecord, onCueSelect: (cue: A
 function renderCuePanel(cues: AiCue[]) {
   return (
     <section className="summary-card cue-panel-card">
-      <h2>AI Summary</h2>
+      <h2>Current AI Cue</h2>
       {cues[0] ? <p className="panel-copy">{cues[0].output}</p> : <div className="empty-state summary-empty">-</div>}
       <h2>AI Cues</h2>
       <div className="cue-list">
@@ -1476,6 +1791,14 @@ function renderCueDetailModal(cue: AiCue, onClose: () => void) {
 
 function renderTranscript(lines: TranscriptLine[], autoFollow = false, title?: string) {
   return <TranscriptCard lines={lines} autoFollow={autoFollow} title={title} />;
+}
+
+function renderPrenotePage(note: Prenote | null) {
+  return (
+    <div className="conversation-prenote-page">
+      {renderPrenote(note)}
+    </div>
+  );
 }
 
 function TranscriptCard({ lines, autoFollow, title }: { lines: TranscriptLine[]; autoFollow: boolean; title?: string }) {
