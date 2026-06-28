@@ -151,6 +151,7 @@ h1 {
 .status-panel,
 .panel,
 .history-panel,
+.voice-panel,
 .manual-send {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.94);
@@ -212,6 +213,7 @@ h1 {
 }
 
 .action-grid button,
+.voice-actions button,
 .manual-send button {
   display: inline-flex;
   align-items: center;
@@ -227,9 +229,75 @@ h1 {
 }
 
 .action-grid .primary-action,
+.voice-actions button:first-child,
 .manual-send button {
   background: #202322;
   color: #fff;
+}
+
+.voice-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 14px;
+}
+
+.voice-heading {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.voice-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  background: #eef0ed;
+  color: #27302b;
+}
+
+.voice-panel.listening .voice-icon {
+  background: #dff3e6;
+  color: #1f6c3d;
+}
+
+.voice-panel.blocked .voice-icon,
+.voice-panel.unsupported .voice-icon,
+.voice-panel.error .voice-icon {
+  background: #fff1d6;
+  color: #8a5a12;
+}
+
+.voice-heading h2 {
+  margin-top: 4px;
+  color: #202322;
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.voice-copy,
+.interim-transcript {
+  color: #56615b;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.interim-transcript {
+  min-height: 42px;
+  border-radius: 8px;
+  background: #eef0ed;
+  padding: 10px;
+  color: #253029;
+}
+
+.voice-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .manual-send {

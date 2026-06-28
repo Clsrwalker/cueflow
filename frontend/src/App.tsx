@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertCircle,
   History,
   ListRestart,
   MessageSquareText,
+  Mic,
+  MicOff,
   Play,
   Radio,
   RotateCcw,
@@ -15,6 +18,7 @@ import type { Conversation, ConversationSummary, Cue, CueType, TranscriptAckEven
 
 type View = "live" | "history";
 type ConnectionState = "idle" | "connected" | "replaying" | "summary-pending" | "summary-ready";
+type SpeechState = "idle" | "starting" | "listening" | "unsupported" | "blocked" | "error";
 
 type HistoryRecord = {
   conversation: Conversation;
@@ -22,6 +26,53 @@ type HistoryRecord = {
   cues: Cue[];
   summary: ConversationSummary | null;
 };
+
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  0?: {
+    transcript?: string;
+  };
+};
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: SpeechRecognitionResultLike;
+  };
+};
+
+type SpeechRecognitionErrorLike = {
+  error: string;
+};
+
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+  onstart: (() => void) | null;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorLike) => void) | null;
+  onend: (() => void) | null;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
+  const browserWindow = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+  return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition ?? null;
+}
+
+function initialSpeechState(): SpeechState {
+  if (!getSpeechRecognitionConstructor()) return "unsupported";
+  return window.isSecureContext ? "idle" : "blocked";
+}
 
 const DEMO_TRANSCRIPT = [
   "We need to design the cloud architecture for CueFlow.",
@@ -226,15 +277,21 @@ export default function App() {
   const [summary, setSummary] = useState<ConversationSummary | null>(null);
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [selectedHistoryId, setSelectedHistoryId] = useState<string>("");
+  const [speechState, setSpeechState] = useState<SpeechState>(initialSpeechState);
+  const [speechMessage, setSpeechMessage] = useState("");
+  const [interimTranscript, setInterimTranscript] = useState("");
   const [manualText, setManualText] = useState("");
   const [lastAck, setLastAck] = useState<TranscriptAckEvent | null>(null);
   const [pendingCueJob, setPendingCueJob] = useState(false);
   const [pendingSummaryJob, setPendingSummaryJob] = useState(false);
   const [elapsedTick, setElapsedTick] = useState(0);
 
+  const conversationRef = useRef<Conversation | null>(null);
   const transcriptRef = useRef<TranscriptChunk[]>([]);
   const cuesRef = useRef<Cue[]>([]);
   const pendingCueRef = useRef(false);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const shouldListenRef = useRef(false);
   const replayTimersRef = useRef<number[]>([]);
   const workerTimersRef = useRef<number[]>([]);
 
@@ -252,6 +309,36 @@ export default function App() {
     return "Idle";
   }, [connectionState]);
 
+  const speechTitle = useMemo(() => {
+    if (speechState === "listening") return "Listening";
+    if (speechState === "starting") return "Starting microphone";
+    if (speechState === "unsupported") return "Speech recognition unavailable";
+    if (speechState === "blocked") return "Microphone unavailable";
+    if (speechState === "error") return "Recognition stopped";
+    return conversation?.status === "ACTIVE" ? "Microphone ready" : "Start a conversation";
+  }, [conversation?.status, speechState]);
+
+  const speechCopy = useMemo(() => {
+    if (speechMessage) return speechMessage;
+    if (speechState === "unsupported") return "Use Chrome or Edge for browser speech recognition, or use the fallback transcript input.";
+    if (speechState === "blocked") return "Microphone access requires HTTPS or localhost. The plain HTTP S3 website link cannot use the mic.";
+    if (conversation?.status === "ACTIVE") return "CueFlow will append final recognized speech to the transcript in real time.";
+    return "Start a session to open the real-time transcription channel.";
+  }, [conversation?.status, speechMessage, speechState]);
+
+  const showManualFallback = speechState === "unsupported" || speechState === "blocked" || speechState === "error";
+  const canStartMic = Boolean(
+    conversation?.status === "ACTIVE"
+      && speechState !== "listening"
+      && speechState !== "starting"
+      && speechState !== "unsupported"
+      && speechState !== "blocked",
+  );
+
+  useEffect(() => {
+    conversationRef.current = conversation;
+  }, [conversation]);
+
   useEffect(() => {
     if (!conversation || conversation.status !== "ACTIVE") return;
     const interval = window.setInterval(() => setElapsedTick((current) => current + 1), 1000);
@@ -259,6 +346,8 @@ export default function App() {
   }, [conversation]);
 
   useEffect(() => () => {
+    shouldListenRef.current = false;
+    recognitionRef.current?.abort();
     replayTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     workerTimersRef.current.forEach((timer) => window.clearTimeout(timer));
   }, []);
@@ -268,6 +357,122 @@ export default function App() {
     workerTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     replayTimersRef.current = [];
     workerTimersRef.current = [];
+  }
+
+  function createRecognition(): SpeechRecognitionLike | null {
+    if (!window.isSecureContext) {
+      setSpeechState("blocked");
+      setSpeechMessage("Microphone transcription requires HTTPS or localhost.");
+      return null;
+    }
+
+    const Recognition = getSpeechRecognitionConstructor();
+    if (!Recognition) {
+      setSpeechState("unsupported");
+      setSpeechMessage("This browser does not support built-in speech recognition.");
+      return null;
+    }
+
+    const recognition = new Recognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = navigator.language || "en-US";
+
+    recognition.onstart = () => {
+      setSpeechState("listening");
+      setSpeechMessage("Listening. Speak normally and CueFlow will append final transcript segments.");
+    };
+
+    recognition.onresult = (event) => {
+      let finalText = "";
+      let interimText = "";
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcriptText = result[0]?.transcript?.trim() ?? "";
+        if (!transcriptText) continue;
+        if (result.isFinal) {
+          finalText = `${finalText} ${transcriptText}`.trim();
+        } else {
+          interimText = `${interimText} ${transcriptText}`.trim();
+        }
+      }
+
+      setInterimTranscript(interimText);
+      if (finalText) {
+        appendTranscript(finalText);
+      }
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === "no-speech") {
+        setSpeechMessage("Still listening. No speech detected yet.");
+        return;
+      }
+
+      shouldListenRef.current = false;
+      setInterimTranscript("");
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        setSpeechState("blocked");
+        setSpeechMessage("Microphone permission was blocked. Allow microphone access and start again.");
+      } else {
+        setSpeechState("error");
+        setSpeechMessage(`Speech recognition stopped: ${event.error}.`);
+      }
+    };
+
+    recognition.onend = () => {
+      const shouldRestart = shouldListenRef.current && conversationRef.current?.status === "ACTIVE";
+      if (!shouldRestart) {
+        setInterimTranscript("");
+        setSpeechState((current) => current === "listening" || current === "starting" ? "idle" : current);
+        return;
+      }
+
+      window.setTimeout(() => {
+        try {
+          recognition.start();
+        } catch {
+          setSpeechState("error");
+          setSpeechMessage("Speech recognition could not restart automatically.");
+        }
+      }, 300);
+    };
+
+    return recognition;
+  }
+
+  function startSpeechRecognition(activeConversation = conversationRef.current) {
+    if (!activeConversation || activeConversation.status !== "ACTIVE") return;
+
+    const recognition = recognitionRef.current ?? createRecognition();
+    if (!recognition) return;
+
+    recognitionRef.current = recognition;
+    shouldListenRef.current = true;
+    setInterimTranscript("");
+    setSpeechState("starting");
+    setSpeechMessage("Starting microphone...");
+
+    try {
+      recognition.start();
+    } catch {
+      setSpeechState("listening");
+    }
+  }
+
+  function stopSpeechRecognition(message = "Microphone paused.") {
+    shouldListenRef.current = false;
+    setInterimTranscript("");
+    if (speechState !== "unsupported" && speechState !== "blocked") {
+      setSpeechState("idle");
+    }
+    setSpeechMessage(message);
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      recognitionRef.current?.abort();
+    }
   }
 
   function startConversation() {
@@ -282,6 +487,7 @@ export default function App() {
       cueCount: 0,
       summaryStatus: "NOT_STARTED",
     };
+    conversationRef.current = nextConversation;
     transcriptRef.current = [];
     cuesRef.current = [];
     pendingCueRef.current = false;
@@ -295,22 +501,24 @@ export default function App() {
     setConnectionState("connected");
     setElapsedTick(0);
     setView("live");
+    startSpeechRecognition(nextConversation);
   }
 
   function appendTranscript(text: string) {
-    if (!conversation || conversation.status !== "ACTIVE") return;
+    const activeConversation = conversationRef.current;
+    if (!activeConversation || activeConversation.status !== "ACTIVE") return;
     const trimmed = text.trim();
     if (!trimmed) return;
 
     const createdAt = isoNow();
     const chunk: TranscriptChunk = {
-      conversationId: conversation.conversationId,
+      conversationId: activeConversation.conversationId,
       chunkId: `${transcriptRef.current.length + 1}`.padStart(6, "0"),
       speaker: "speaker_1",
       text: trimmed,
       clientTimestamp: createdAt,
       createdAt,
-      s3Key: `raw/${conversation.conversationId}/chunks/${`${transcriptRef.current.length + 1}`.padStart(6, "0")}.json`,
+      s3Key: `raw/${activeConversation.conversationId}/chunks/${`${transcriptRef.current.length + 1}`.padStart(6, "0")}.json`,
     };
 
     const nextTranscript = [...transcriptRef.current, chunk];
@@ -318,7 +526,7 @@ export default function App() {
     setTranscript(nextTranscript);
     setLastAck({
       eventType: "transcript.ack",
-      conversationId: conversation.conversationId,
+      conversationId: activeConversation.conversationId,
       chunkId: chunk.chunkId,
       receivedAt: createdAt,
     });
@@ -328,7 +536,7 @@ export default function App() {
       setPendingCueJob(true);
       const timer = window.setTimeout(() => {
         const context = transcriptRef.current.slice(-3);
-        const cue = buildCue(conversation.conversationId, context);
+        const cue = buildCue(activeConversation.conversationId, context);
         const nextCues = [cue, ...cuesRef.current];
         cuesRef.current = nextCues;
         setCues(nextCues);
@@ -344,6 +552,7 @@ export default function App() {
 
   function replayDemoTranscript() {
     if (!conversation || conversation.status !== "ACTIVE") return;
+    stopSpeechRecognition("Microphone paused during demo replay.");
     replayTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     replayTimersRef.current = [];
     setConnectionState("replaying");
@@ -365,6 +574,7 @@ export default function App() {
 
   function endConversation() {
     if (!conversation || conversation.status !== "ACTIVE") return;
+    stopSpeechRecognition("Microphone stopped.");
     replayTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     replayTimersRef.current = [];
     const endedAt = isoNow();
@@ -375,6 +585,7 @@ export default function App() {
       summaryStatus: "PENDING",
       cueCount: cuesRef.current.length,
     };
+    conversationRef.current = endedConversation;
     setConversation(endedConversation);
     setPendingSummaryJob(true);
     setConnectionState("summary-pending");
@@ -385,6 +596,7 @@ export default function App() {
         ...endedConversation,
         summaryStatus: "READY",
       };
+      conversationRef.current = readyConversation;
       const record: HistoryRecord = {
         conversation: readyConversation,
         transcript: transcriptRef.current,
@@ -403,6 +615,8 @@ export default function App() {
 
   function clearSession() {
     clearTimers();
+    stopSpeechRecognition("Microphone stopped.");
+    conversationRef.current = null;
     transcriptRef.current = [];
     cuesRef.current = [];
     pendingCueRef.current = false;
@@ -452,7 +666,7 @@ export default function App() {
               <p className="panel-label">Live Conversation</p>
               <h2>{conversation ? dateLabel(conversation.startedAt) : "Ready"}</h2>
               <p className="session-meta">
-                {conversation ? `${conversation.status} · ${liveDuration}` : "Start a session to open the local real-time channel."}
+                {conversation ? `${conversation.status} - ${liveDuration}` : "Start a session to open live transcription."}
               </p>
             </div>
             <div className="metric-grid">
@@ -477,17 +691,43 @@ export default function App() {
             </button>
           </section>
 
-          <section className="manual-send">
-            <textarea
-              value={manualText}
-              placeholder="Add transcript chunk"
-              rows={3}
-              onChange={(event) => setManualText(event.target.value)}
-            />
-            <button disabled={!conversation || conversation.status !== "ACTIVE" || !manualText.trim()} onClick={sendManualTranscript}>
-              <Send size={18} /> Send Transcript
-            </button>
+          <section className={`voice-panel ${speechState}`}>
+            <div className="voice-heading">
+              <span className="voice-icon">
+                {speechState === "blocked" || speechState === "unsupported" || speechState === "error"
+                  ? <AlertCircle size={20} />
+                  : <Mic size={20} />}
+              </span>
+              <div>
+                <p className="panel-label">Live Transcription</p>
+                <h2>{speechTitle}</h2>
+              </div>
+            </div>
+            <p className="voice-copy">{speechCopy}</p>
+            {interimTranscript ? <p className="interim-transcript">{interimTranscript}</p> : null}
+            <div className="voice-actions">
+              <button disabled={!canStartMic} onClick={() => startSpeechRecognition()}>
+                <Mic size={18} /> Start Mic
+              </button>
+              <button disabled={speechState !== "listening" && speechState !== "starting"} onClick={() => stopSpeechRecognition()}>
+                <MicOff size={18} /> Stop Mic
+              </button>
+            </div>
           </section>
+
+          {showManualFallback ? (
+            <section className="manual-send">
+              <textarea
+                value={manualText}
+                placeholder="Fallback transcript input"
+                rows={3}
+                onChange={(event) => setManualText(event.target.value)}
+              />
+              <button disabled={!conversation || conversation.status !== "ACTIVE" || !manualText.trim()} onClick={sendManualTranscript}>
+                <Send size={18} /> Send Fallback Transcript
+              </button>
+            </section>
+          ) : null}
 
           <ConnectionStatus
             state={statusLabel}
@@ -653,7 +893,7 @@ function HistoryPanel({
           >
             <span>
               <strong>{dateLabel(record.conversation.startedAt)}</strong>
-              <small>{record.transcript.length} transcript chunks · {record.cues.length} cues</small>
+              <small>{record.transcript.length} transcript chunks - {record.cues.length} cues</small>
             </span>
             <em>{record.conversation.summaryStatus}</em>
           </button>

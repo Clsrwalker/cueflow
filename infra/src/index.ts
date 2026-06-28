@@ -18,8 +18,8 @@ const stage = app.node.tryGetContext("stage") ?? "dev";
 const bootstrapless = app.node.tryGetContext("bootstrapless") === "true";
 const labRoleArn = app.node.tryGetContext("labRoleArn") as string | undefined;
 const skipFrontend = app.node.tryGetContext("skipFrontend") === "true";
-const frontendMode = (app.node.tryGetContext("frontendMode") ?? "cloudfront") as "cloudfront" | "s3-website";
-if (!["cloudfront", "s3-website"].includes(frontendMode)) {
+const frontendMode = (app.node.tryGetContext("frontendMode") ?? "cloudfront") as "cloudfront" | "s3-website" | "api-static";
+if (!["cloudfront", "s3-website", "api-static"].includes(frontendMode)) {
   throw new Error(`Unsupported frontendMode: ${frontendMode}`);
 }
 const env = {
@@ -32,10 +32,11 @@ type CueFlowStackProps = cdk.StackProps & {
   autoDeleteObjects?: boolean;
 };
 
-type FrontendMode = "cloudfront" | "s3-website";
+type FrontendMode = "cloudfront" | "s3-website" | "api-static";
 
 type FrontendHostingStackProps = CueFlowStackProps & {
   mode: FrontendMode;
+  lambdaRoleArn?: string;
 };
 
 class StorageStack extends cdk.Stack {
@@ -142,13 +143,17 @@ class QueueStack extends cdk.Stack {
 class FrontendHostingStack extends cdk.Stack {
   readonly frontendBucket: s3.Bucket;
   readonly distribution?: cloudfront.Distribution;
+  readonly httpsApi?: apigwv2.HttpApi;
+  readonly assetServer?: lambda.Function;
 
   constructor(scope: Construct, id: string, props: FrontendHostingStackProps) {
     super(scope, id, props);
 
     const useS3Website = props.mode === "s3-website";
+    const useApiStatic = props.mode === "api-static";
+    const usePublicBucket = useS3Website || useApiStatic;
     this.frontendBucket = new s3.Bucket(this, "FrontendBucket", {
-      blockPublicAccess: useS3Website
+      blockPublicAccess: usePublicBucket
         ? new s3.BlockPublicAccess({
             blockPublicAcls: false,
             ignorePublicAcls: false,
@@ -158,14 +163,14 @@ class FrontendHostingStack extends cdk.Stack {
         : s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: !useS3Website,
-      publicReadAccess: useS3Website,
+      publicReadAccess: usePublicBucket,
       websiteIndexDocument: useS3Website ? "index.html" : undefined,
       websiteErrorDocument: useS3Website ? "index.html" : undefined,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: props.autoDeleteObjects ?? true,
     });
 
-    if (!useS3Website) {
+    if (props.mode === "cloudfront") {
       this.distribution = new cloudfront.Distribution(this, "FrontendDistribution", {
         defaultRootObject: "index.html",
         defaultBehavior: {
@@ -181,9 +186,101 @@ class FrontendHostingStack extends cdk.Stack {
       });
     }
 
+    if (useApiStatic) {
+      const lambdaRole = props.lambdaRoleArn
+        ? iam.Role.fromRoleArn(this, "LearnerLabFrontendRole", props.lambdaRoleArn, { mutable: false })
+        : undefined;
+      const physicalName = `cueflow-frontend-site-${props.stage}`;
+      const logGroup = new logs.LogGroup(this, "FrontendAssetServerLogGroup", {
+        logGroupName: `/aws/lambda/${physicalName}`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+
+      this.assetServer = new lambda.Function(this, "FrontendAssetServer", {
+        functionName: physicalName,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: "index.handler",
+        memorySize: 128,
+        timeout: cdk.Duration.seconds(10),
+        logGroup,
+        role: lambdaRole,
+        environment: {
+          FRONTEND_BUCKET_NAME: this.frontendBucket.bucketName,
+          FRONTEND_REGION: cdk.Stack.of(this).region,
+        },
+        code: lambda.Code.fromInline(`
+const CONTENT_TYPES = {
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+
+exports.handler = async (event) => {
+  const rawPath = event.rawPath || "/";
+  let key = decodeURIComponent(rawPath).replace(/^\\/+/, "");
+  if (!key || key.endsWith("/")) {
+    key = key + "index.html";
+  }
+
+  const response = await readAsset(key);
+  if (response.statusCode === 403 || response.statusCode === 404) {
+    const acceptsHtml = String(event.headers?.accept || "").includes("text/html");
+    if (!key.includes(".") || acceptsHtml) {
+      return readAsset("index.html", 200);
+    }
+  }
+  return response;
+};
+
+async function readAsset(key, overrideStatusCode) {
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = "https://" + process.env.FRONTEND_BUCKET_NAME + ".s3." + process.env.FRONTEND_REGION + ".amazonaws.com/" + encodedKey;
+  const response = await fetch(url);
+  if (!response.ok) {
+    return {
+      statusCode: response.status,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+      body: "Not found",
+    };
+  }
+
+  return {
+    statusCode: overrideStatusCode || response.status,
+    headers: {
+      "content-type": contentType(key),
+      "cache-control": key === "index.html" ? "no-store" : "public, max-age=31536000, immutable",
+    },
+    body: await response.text(),
+  };
+}
+
+function contentType(key) {
+  const extension = key.includes(".") ? key.slice(key.lastIndexOf(".")) : "";
+  return CONTENT_TYPES[extension] || "application/octet-stream";
+}
+`),
+      });
+
+      if (!lambdaRole) {
+        this.frontendBucket.grantRead(this.assetServer);
+      }
+
+      const frontendIntegration = new integrations.HttpLambdaIntegration("FrontendAssetIntegration", this.assetServer);
+      this.httpsApi = new apigwv2.HttpApi(this, "FrontendHttpsApi", {
+        apiName: `cueflow-frontend-${props.stage}`,
+      });
+      this.httpsApi.addRoutes({ path: "/", methods: [apigwv2.HttpMethod.GET], integration: frontendIntegration });
+      this.httpsApi.addRoutes({ path: "/{proxy+}", methods: [apigwv2.HttpMethod.GET], integration: frontendIntegration });
+    }
+
     new cdk.CfnOutput(this, "FrontendBucketName", { value: this.frontendBucket.bucketName });
     if (useS3Website) {
       new cdk.CfnOutput(this, "FrontendWebsiteUrl", { value: this.frontendBucket.bucketWebsiteUrl });
+    } else if (useApiStatic && this.httpsApi) {
+      new cdk.CfnOutput(this, "FrontendHttpsUrl", { value: this.httpsApi.apiEndpoint });
     } else if (this.distribution) {
       new cdk.CfnOutput(this, "FrontendDistributionDomain", { value: this.distribution.distributionDomainName });
     }
@@ -426,6 +523,7 @@ if (!skipFrontend) {
   new FrontendHostingStack(app, `CueFlowFrontend-${stage}`, {
     ...stackProps,
     mode: frontendMode,
+    lambdaRoleArn: labRoleArn,
   });
 }
 const api = new ApiStack(app, `CueFlowApi-${stage}`, {

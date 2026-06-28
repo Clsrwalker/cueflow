@@ -8,7 +8,7 @@ Trade-off: inline Lambda placeholders keep synth and deploy simple for the infra
 
 ## Security
 
-Cloud resources use HTTPS/WSS endpoints for APIs, S3 managed encryption, SQS managed encryption, DynamoDB managed persistence, and least-privilege grants from resources to functions. The default CloudFront frontend keeps the S3 bucket private; the Learner Lab S3 website fallback intentionally exposes only built static frontend assets. Credentials are not committed. Deployment credentials are expected through GitHub OIDC or local AWS profile configuration.
+Cloud resources use HTTPS/WSS endpoints for APIs, S3 managed encryption, SQS managed encryption, DynamoDB managed persistence, and least-privilege grants from resources to functions. The default CloudFront frontend keeps the S3 bucket private; the Learner Lab API Gateway fallback serves built static frontend assets over HTTPS so browser microphone permission can work without CloudFront. Credentials are not committed. Deployment credentials are expected through GitHub OIDC or local AWS profile configuration.
 
 Trade-off: the course MVP does not include a full user identity system. A production version should add Cognito or a JWT authorizer and tighten CORS origins.
 

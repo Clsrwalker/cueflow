@@ -7,7 +7,7 @@ CueFlow is a mobile-first conversation intelligence MVP. A user starts a live se
 Presentation tier:
 - React + Vite web client.
 - Mobile-first live conversation, cue list, transcript, summary, and history views.
-- Hosted from S3 through CloudFront in AWS by default, with an S3 static website fallback for restricted Learner Lab accounts.
+- Hosted from S3 through CloudFront in AWS by default, with an API Gateway HTTPS static frontend fallback for restricted Learner Lab accounts.
 
 API and edge tier:
 - API Gateway HTTP API for conversation lifecycle, history, cue listing, and summary retrieval.
