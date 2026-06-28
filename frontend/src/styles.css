@@ -403,6 +403,10 @@ pre {
   font-size: 15px;
 }
 
+.home-start-section {
+  margin: 12px 0 18px;
+}
+
 .record-section {
   display: flex;
   flex-direction: column;
@@ -848,42 +852,9 @@ pre {
   background: #38bd5b;
 }
 
-.tabs {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 1fr;
-  align-items: end;
-  min-height: 56px;
-}
-
-.tabs button {
-  position: relative;
-  height: 56px;
-  color: #8b8b8b;
-  font-size: 17px;
-  transition: color 150ms ease, transform 150ms ease;
-}
-
-.tabs button.active {
-  color: #232323;
-  transform: translateY(-1px);
-}
-
-.tabs button.active::after {
-  content: "";
-  position: absolute;
-  right: 16px;
-  bottom: 0;
-  left: 16px;
-  height: 3px;
-  background: #222;
-  transform-origin: center;
-  animation: tab-line 180ms ease-out both;
-}
-
 .live-content,
 .history-content {
-  height: calc(100vh - 314px);
+  height: calc(100vh - 258px);
   min-height: 260px;
   overflow: hidden;
   padding-bottom: 0;
@@ -911,6 +882,33 @@ pre {
   gap: 14px;
   height: 100%;
   overflow-y: auto;
+}
+
+.dual-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-side {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 14px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cue-panel-card {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.panel-copy {
+  min-height: 68px;
+  margin-bottom: 18px;
 }
 
 .summary-card {
@@ -1127,6 +1125,12 @@ pre {
   overflow-y: auto;
 }
 
+.transcript-card h2 {
+  margin-bottom: 14px;
+  font-size: 18px;
+  font-weight: 420;
+}
+
 .transcript-card article + article {
   margin-top: 20px;
 }
@@ -1146,6 +1150,17 @@ pre {
 .transcript-card article.partial p {
   color: #777;
   font-style: italic;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 148px;
+  border-radius: 8px;
+  background: #f6f6f5;
+  color: #8a8a8a;
+  font-size: 20px;
 }
 
 .cue-list {
@@ -1212,15 +1227,6 @@ pre {
   }
 }
 
-@keyframes tab-line {
-  from {
-    transform: scaleX(0.45);
-  }
-  to {
-    transform: scaleX(1);
-  }
-}
-
 @keyframes drawer-enter {
   from {
     transform: translateX(-18px);
@@ -1247,6 +1253,26 @@ pre {
   .live-actions button {
     gap: 14px;
     font-size: 18px;
+  }
+}
+
+@media (max-width: 720px) {
+  .dual-workspace {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .workspace-side {
+    grid-template-rows: minmax(240px, auto) auto;
+    overflow: visible;
+  }
+
+  .dual-workspace > .summary-stack,
+  .workspace-side .transcript-card,
+  .cue-panel-card {
+    height: auto;
+    min-height: 240px;
+    overflow: visible;
   }
 }
 
@@ -1290,15 +1316,21 @@ pre {
     display: grid;
     grid-template-areas:
       "header header"
+      "start notes"
       "records notes";
     grid-template-columns: minmax(0, 1fr) minmax(340px, 380px);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
     gap: 24px;
     min-height: 100vh;
   }
 
   .home-header {
     grid-area: header;
+  }
+
+  .home-start-section {
+    grid-area: start;
+    margin: 0;
   }
 
   .record-section {
@@ -1356,20 +1388,26 @@ pre {
     font-size: 14px;
   }
 
-  .tabs {
-    max-width: 720px;
-    margin: 6px auto 0;
-  }
-
   .live-content,
   .history-content {
-    height: calc(100vh - 318px);
+    height: calc(100vh - 252px);
     min-height: 420px;
   }
 
   .summary-stack {
     grid-template-columns: minmax(0, 1fr) minmax(320px, 0.82fr);
     align-items: start;
+  }
+
+  .dual-workspace .summary-stack {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .dual-workspace .transcript-card,
+  .dual-workspace .prenote-readonly {
+    max-width: none;
+    margin: 0;
   }
 
   .summary-stack .summary-card:first-child,

@@ -21,7 +21,6 @@ import {
 } from "lucide-react";
 
 type Screen = "home" | "settings" | "prenoteManager" | "live" | "history" | "conversationSettings";
-type ConversationTab = "summary" | "transcript" | "prenote";
 type CueCategory = "response" | "concept" | "suggestion" | "person";
 type SummaryStatus = "not_started" | "queued" | "running" | "ready" | "failed";
 type SpeechLanguage = "english" | "chinese" | "auto";
@@ -215,7 +214,7 @@ const SAMPLE_RECORDS: ConversationRecord[] = [
         id: "cue-2",
         category: "suggestion",
         title: "Demo talking point",
-        output: "Show the listener view first, then open transcript and summary tabs from the same session.",
+        output: "Show the live workspace with AI summary and transcript visible at the same time.",
         createdAt: new Date().toISOString(),
         source: "auto",
       },
@@ -498,8 +497,6 @@ export default function App() {
   const [prenoteDraft, setPrenoteDraft] = useState<PrenoteDraft>({ title: "", text: "" });
   const [cues, setCues] = useState<AiCue[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
-  const [liveTab, setLiveTab] = useState<ConversationTab>("transcript");
-  const [historyTab, setHistoryTab] = useState<ConversationTab>("summary");
   const [activeRecordId, setActiveRecordId] = useState<string>("");
   const [isListening, setIsListening] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -804,7 +801,6 @@ export default function App() {
     setTranscript([]);
     transcriptRef.current = [];
     cuesRef.current = [];
-    setLiveTab("transcript");
     setIsListening(true);
     setScreen("live");
     startRecognition();
@@ -843,7 +839,6 @@ export default function App() {
     setActiveConversationId(null);
     activeConversationIdRef.current = null;
     setConnectionStatus("ready");
-    setHistoryTab("summary");
     setScreen("history");
   }
 
@@ -865,7 +860,6 @@ export default function App() {
     }
     setSelectedCueDetail(null);
     setActiveRecordId(id);
-    setHistoryTab("summary");
     setScreen("history");
   }
 
@@ -1163,11 +1157,8 @@ export default function App() {
           </div>
           <span className="live-duration"><span />{elapsedLabel(elapsedSeconds)}</span>
         </section>
-        {renderTabs(liveTab, setLiveTab, Boolean(activePrenote))}
         <section className="live-content">
-          {liveTab === "summary" && renderCuePanel(cues)}
-          {liveTab === "transcript" && renderTranscript(transcript, true)}
-          {liveTab === "prenote" && renderPrenote(activePrenote)}
+          {renderLiveWorkspace(cues, transcript, activePrenote)}
         </section>
         <footer className="live-actions">
           <button onClick={togglePauseConversation}>
@@ -1196,11 +1187,8 @@ export default function App() {
           </div>
           <span>{activeRecord.duration}</span>
         </section>
-        {renderTabs(historyTab, setHistoryTab, Boolean(activeRecord.usedPrenote))}
         <section className="history-content">
-          {historyTab === "summary" && renderSummary(activeRecord, setSelectedCueDetail)}
-          {historyTab === "transcript" && renderTranscript(activeRecord.transcript)}
-          {historyTab === "prenote" && renderPrenote(activeRecord.usedPrenote || null)}
+          {renderHistoryWorkspace(activeRecord, setSelectedCueDetail)}
         </section>
         {selectedCueDetail && renderCueDetailModal(selectedCueDetail, () => setSelectedCueDetail(null))}
       </main>
@@ -1286,6 +1274,12 @@ export default function App() {
         </aside>
       )}
 
+      <section className="home-start-section">
+        <button className="start-button" onClick={startConversation}>
+          <span>-&gt;</span> Start
+        </button>
+      </section>
+
       <section className="record-section">
         <div className="section-row">
           <h2>My Records</h2>
@@ -1333,49 +1327,53 @@ export default function App() {
             </button>
           ))}
         </div>
-        <button className="start-button" onClick={startConversation}>
-          <span>-&gt;</span> Start
-        </button>
       </section>
     </main>
   );
 }
 
-function renderTabs(active: ConversationTab, setActive: (tab: ConversationTab) => void, hasPrenote: boolean) {
-  const tabs: Array<{ key: ConversationTab; label: string }> = [
-    { key: "summary", label: "AI Summary" },
-    { key: "transcript", label: "Transcript" },
-  ];
-  if (hasPrenote) tabs.push({ key: "prenote", label: "Prepared Notes" });
+function renderLiveWorkspace(cues: AiCue[], transcript: TranscriptLine[], activePrenote: Prenote | null) {
   return (
-    <nav className="tabs">
-      {tabs.map((tab) => (
-        <button key={tab.key} className={active === tab.key ? "active" : ""} onClick={() => setActive(tab.key)}>
-          {tab.label}
-        </button>
-      ))}
-    </nav>
+    <div className="dual-workspace live-workspace">
+      {renderCuePanel(cues)}
+      <div className="workspace-side">
+        {renderTranscript(transcript, true, "Transcript")}
+        {activePrenote && renderPrenote(activePrenote)}
+      </div>
+    </div>
+  );
+}
+
+function renderHistoryWorkspace(record: ConversationRecord, onCueSelect: (cue: AiCue) => void) {
+  return (
+    <div className="dual-workspace history-workspace">
+      {renderSummary(record, onCueSelect)}
+      <div className="workspace-side">
+        {renderTranscript(record.transcript, false, "Transcript")}
+        {record.usedPrenote && renderPrenote(record.usedPrenote)}
+      </div>
+    </div>
   );
 }
 
 function renderCuePanel(cues: AiCue[]) {
   return (
-    <div className="summary-stack">
-      <section className="summary-card">
-        <h2>AI Cues</h2>
-        <div className="cue-list">
-          {cues.length ? cues.slice(0, 6).map((cue) => (
-            <article className="cue-row" key={cue.id}>
-              <span className="cue-icon">{cueIcon(cue.category)}</span>
-              <div>
-                <h3>{cue.title}</h3>
-                <p>{cue.output}</p>
-              </div>
-            </article>
-          )) : <p>-</p>}
-        </div>
-      </section>
-    </div>
+    <section className="summary-card cue-panel-card">
+      <h2>AI Summary</h2>
+      {cues[0] ? <p className="panel-copy">{cues[0].output}</p> : <div className="empty-state summary-empty">-</div>}
+      <h2>AI Cues</h2>
+      <div className="cue-list">
+        {cues.length ? cues.slice(0, 6).map((cue) => (
+          <article className="cue-row" key={cue.id}>
+            <span className="cue-icon">{cueIcon(cue.category)}</span>
+            <div>
+              <h3>{cue.title}</h3>
+              <p>{cue.output}</p>
+            </div>
+          </article>
+        )) : <div className="empty-state">-</div>}
+      </div>
+    </section>
   );
 }
 
@@ -1476,11 +1474,11 @@ function renderCueDetailModal(cue: AiCue, onClose: () => void) {
   );
 }
 
-function renderTranscript(lines: TranscriptLine[], autoFollow = false) {
-  return <TranscriptCard lines={lines} autoFollow={autoFollow} />;
+function renderTranscript(lines: TranscriptLine[], autoFollow = false, title?: string) {
+  return <TranscriptCard lines={lines} autoFollow={autoFollow} title={title} />;
 }
 
-function TranscriptCard({ lines, autoFollow }: { lines: TranscriptLine[]; autoFollow: boolean }) {
+function TranscriptCard({ lines, autoFollow, title }: { lines: TranscriptLine[]; autoFollow: boolean; title?: string }) {
   const scrollRef = useRef<HTMLElement | null>(null);
   const shouldFollowRef = useRef(true);
   const lastLine = lines[lines.length - 1];
@@ -1508,12 +1506,13 @@ function TranscriptCard({ lines, autoFollow }: { lines: TranscriptLine[]; autoFo
 
   return (
     <section className="transcript-card" ref={scrollRef} onScroll={handleScroll}>
+      {title && <h2>{title}</h2>}
       {lines.length ? lines.map((line) => (
         <article className={line.partial ? "partial" : ""} key={line.id}>
           <time>{line.time}</time>
           <p>{line.text}</p>
         </article>
-      )) : <p>-</p>}
+      )) : <div className="empty-state">-</div>}
     </section>
   );
 }
