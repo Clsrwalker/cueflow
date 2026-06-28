@@ -479,6 +479,7 @@ pre {
 
 .record-card:active,
 .prenote-card:active,
+.prenote-list-card:active,
 .setting-row:active,
 .setting-choice:active {
   transform: scale(1.015);
@@ -739,15 +740,13 @@ pre {
   margin-top: 0;
 }
 
-.prenote-create-form {
+.prenote-detail-form {
   display: grid;
   gap: 10px;
 }
 
-.prenote-create-form input,
-.prenote-create-form textarea,
-.manage-note-card input,
-.manage-note-card textarea {
+.prenote-detail-form input,
+.prenote-detail-form textarea {
   width: 100%;
   border: 0;
   border-radius: 8px;
@@ -756,21 +755,19 @@ pre {
   outline: none;
 }
 
-.prenote-create-form input,
-.manage-note-card input {
+.prenote-detail-form input {
   min-height: 52px;
   padding: 0 14px;
 }
 
-.prenote-create-form textarea,
-.manage-note-card textarea {
-  min-height: 126px;
+.prenote-detail-form textarea {
+  min-height: 260px;
   resize: vertical;
   padding: 14px;
   line-height: 1.35;
 }
 
-.prenote-create-form button {
+.save-note-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -784,34 +781,78 @@ pre {
 
 .manage-note-list {
   display: grid;
-  gap: 12px;
+  align-content: start;
+  gap: 8px;
 }
 
-.manage-note-card {
-  display: grid;
-  gap: 10px;
+.prenote-list-row {
+  position: relative;
+  min-height: 82px;
+  overflow: hidden;
   border-radius: 8px;
-  background: #dededd;
-  padding: 12px;
+}
+
+.prenote-delete-button {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 82px;
+  border-radius: 0 8px 8px 0;
+  background: #d7473f;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 430;
+  z-index: 0;
+}
+
+.prenote-list-card {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 82px;
+  border-radius: 8px;
+  background: #fff;
+  padding: 13px 10px 12px 14px;
+  transition: transform 170ms ease, background 150ms ease;
+  touch-action: pan-y;
+}
+
+.prenote-list-row.swiped .prenote-list-card {
+  transform: translateX(-86px);
+}
+
+.prenote-list-card h3 {
+  min-width: 0;
+  overflow: hidden;
+  color: #202020;
+  font-size: 16px;
+  font-weight: 430;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prenote-list-card p {
+  display: -webkit-box;
+  min-width: 0;
+  margin-top: 6px;
+  overflow: hidden;
+  color: #8a8a8a;
+  font-size: 13px;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .note-select-row {
-  min-height: 44px;
+  min-height: 50px;
   border-radius: 8px;
   background: #fff;
   padding: 0 14px;
-}
-
-.delete-note-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  min-height: 48px;
-  border-radius: 8px;
-  background: #fff;
-  color: #b43d37;
-  font-size: 16px;
 }
 
 .empty-note-state {
@@ -819,6 +860,13 @@ pre {
   background: #fff;
   padding: 18px;
   color: #777;
+}
+
+.settings-error {
+  margin: 0 5px 12px;
+  color: #b43d37;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .conversation-title-card {

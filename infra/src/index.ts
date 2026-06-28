@@ -41,6 +41,7 @@ type FrontendHostingStackProps = CueFlowStackProps & {
   mode: FrontendMode;
   lambdaRoleArn?: string;
   openAiSecretId?: string;
+  tableName?: string;
 };
 
 class StorageStack extends cdk.Stack {
@@ -150,6 +151,7 @@ class FrontendHostingStack extends cdk.Stack {
   readonly httpsApi?: apigwv2.HttpApi;
   readonly assetServer?: lambda.Function;
   readonly aiProxy?: lambda.Function;
+  readonly prenoteApi?: lambda.Function;
 
   constructor(scope: Construct, id: string, props: FrontendHostingStackProps) {
     super(scope, id, props);
@@ -551,16 +553,360 @@ function json(statusCode, payload) {
 `),
       });
 
+      const prenoteApiPhysicalName = `cueflow-prenote-api-${props.stage}`;
+      const prenoteTableName = props.tableName ?? `CueFlowTable-${props.stage}`;
+      const prenoteApiLogGroup = new logs.LogGroup(this, "PrenoteApiLogGroup", {
+        logGroupName: `/aws/lambda/${prenoteApiPhysicalName}`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+
+      this.prenoteApi = new lambda.Function(this, "PrenoteApi", {
+        functionName: prenoteApiPhysicalName,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: "index.handler",
+        memorySize: 256,
+        timeout: cdk.Duration.seconds(15),
+        logGroup: prenoteApiLogGroup,
+        role: lambdaRole,
+        environment: {
+          CUEFLOW_TABLE_NAME: prenoteTableName,
+        },
+        code: lambda.Code.fromInline(`
+const {
+  DynamoDBClient,
+  QueryCommand,
+  PutItemCommand,
+  UpdateItemCommand,
+  DeleteItemCommand,
+} = require("@aws-sdk/client-dynamodb");
+
+const dynamodb = new DynamoDBClient({});
+const TABLE_NAME = process.env.CUEFLOW_TABLE_NAME;
+const PRENOTE_PREFIX = "PRENOTE#";
+
+const JSON_HEADERS = {
+  "content-type": "application/json",
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "content-type,x-cueflow-user-id",
+  "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
+};
+
+exports.handler = async (event) => {
+  const method = (event.requestContext?.http?.method || event.httpMethod || "GET").toUpperCase();
+  if (method === "OPTIONS") {
+    return json(204, {});
+  }
+
+  let body = {};
+  if (method === "POST" || method === "PUT") {
+    try {
+      body = parseBody(event);
+    } catch {
+      return json(400, { error: { code: "INVALID_JSON", message: "Request body must be valid JSON." } });
+    }
+  }
+
+  const route = routeParts(event);
+  if (route.segments[0] !== "prenotes") {
+    return json(404, { error: { code: "ROUTE_NOT_FOUND", message: "Unknown prenote route." } });
+  }
+
+  const userId = userIdFromEvent(event, body);
+  if (!userId) {
+    return json(400, { error: { code: "USER_REQUIRED", message: "x-cueflow-user-id is required." } });
+  }
+
+  try {
+    if (method === "GET" && route.segments.length === 1) {
+      const prenotes = await listPrenotes(userId);
+      return json(200, { prenotes });
+    }
+
+    if (method === "POST" && route.segments.length === 1) {
+      const prenote = await createPrenote(userId, body);
+      return json(201, { prenote });
+    }
+
+    if (route.segments.length === 2) {
+      const noteId = decodeURIComponent(route.segments[1]);
+      if (method === "PUT") {
+        const prenote = await updatePrenote(userId, noteId, body);
+        return json(200, { prenote });
+      }
+      if (method === "DELETE") {
+        await deletePrenote(userId, noteId);
+        return json(204, {});
+      }
+    }
+
+    return json(404, { error: { code: "ROUTE_NOT_FOUND", message: "Unknown prenote route." } });
+  } catch (error) {
+    if (error?.name === "ConditionalCheckFailedException") {
+      return json(404, { error: { code: "PRENOTE_NOT_FOUND", message: "Prepared note was not found." } });
+    }
+    if (error instanceof InputError) {
+      return json(400, { error: { code: error.code, message: error.message } });
+    }
+    console.error(JSON.stringify({
+      eventName: "cueflow.prenote_api_failed",
+      method,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+    return json(500, { error: { code: "PRENOTE_API_FAILED", message: "Prepared note request failed." } });
+  }
+};
+
+class InputError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function routeParts(event) {
+  const path = event.rawPath || event.path || event.requestContext?.http?.path || "/";
+  return {
+    path,
+    segments: path.replace(/^\\/+|\\/+$/g, "").split("/").filter(Boolean),
+  };
+}
+
+function parseBody(event) {
+  const raw = event.isBase64Encoded ? Buffer.from(event.body || "", "base64").toString("utf8") : event.body || "{}";
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Body must be an object.");
+  }
+  return parsed;
+}
+
+function headerValue(event, name) {
+  const headers = event.headers || {};
+  const target = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === target) {
+      return headers[key];
+    }
+  }
+  return undefined;
+}
+
+function userIdFromEvent(event, body) {
+  const raw = headerValue(event, "x-cueflow-user-id") || event.queryStringParameters?.userId || body?.userId || "";
+  const userId = String(raw).trim().toLowerCase();
+  if (!userId || userId.includes("#") || userId.length > 160) {
+    return "";
+  }
+  return userId;
+}
+
+function userPk(userId) {
+  return "USER#" + userId;
+}
+
+function noteSk(noteId) {
+  return PRENOTE_PREFIX + noteId;
+}
+
+function cleanText(value, max) {
+  return String(value || "").replace(/\\r\\n/g, "\\n").replace(/\\n{4,}/g, "\\n\\n\\n").trim().slice(0, max);
+}
+
+function titleFromText(text) {
+  return text.split(/\\n/).find(Boolean)?.slice(0, 80) || "Prepared Note";
+}
+
+function createInput(body) {
+  const textInput = cleanText(body?.text, 12000);
+  const titleInput = cleanText(body?.title, 160).replace(/\\s+/g, " ");
+  if (!textInput && !titleInput) {
+    throw new InputError("PRENOTE_EMPTY", "Title or context is required.");
+  }
+  const title = titleInput || titleFromText(textInput);
+  return {
+    title,
+    text: textInput || title,
+    selected: typeof body?.selected === "boolean" ? body.selected : true,
+  };
+}
+
+function updateInput(body) {
+  const hasTitle = Object.prototype.hasOwnProperty.call(body, "title");
+  const hasText = Object.prototype.hasOwnProperty.call(body, "text");
+  const hasSelected = Object.prototype.hasOwnProperty.call(body, "selected");
+  if (!hasTitle && !hasText && !hasSelected) {
+    throw new InputError("PRENOTE_PATCH_EMPTY", "Nothing to update.");
+  }
+
+  const patch = {};
+  if (hasTitle) {
+    patch.title = cleanText(body.title, 160).replace(/\\s+/g, " ");
+  }
+  if (hasText) {
+    patch.text = cleanText(body.text, 12000);
+  }
+  if (hasTitle && hasText && !patch.title && !patch.text) {
+    throw new InputError("PRENOTE_EMPTY", "Title or context is required.");
+  }
+  if (hasTitle && !patch.title && patch.text) {
+    patch.title = titleFromText(patch.text);
+  }
+  if (hasText && !patch.text && patch.title) {
+    patch.text = patch.title;
+  }
+  if (hasSelected) {
+    if (typeof body.selected !== "boolean") {
+      throw new InputError("PRENOTE_SELECTED_INVALID", "selected must be a boolean.");
+    }
+    patch.selected = body.selected;
+  }
+  return patch;
+}
+
+async function listPrenotes(userId) {
+  const response = await dynamodb.send(new QueryCommand({
+    TableName: TABLE_NAME,
+    KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+    ExpressionAttributeValues: {
+      ":pk": { S: userPk(userId) },
+      ":prefix": { S: PRENOTE_PREFIX },
+    },
+  }));
+
+  return (response.Items || [])
+    .map(itemToPrenote)
+    .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+}
+
+async function createPrenote(userId, body) {
+  const input = createInput(body);
+  const now = new Date().toISOString();
+  const noteId = "pn-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  const item = {
+    PK: { S: userPk(userId) },
+    SK: { S: noteSk(noteId) },
+    GSI1PK: { S: userPk(userId) },
+    GSI1SK: { S: "PRENOTE#" + now + "#" + noteId },
+    entityType: { S: "PRENOTE" },
+    userId: { S: userId },
+    noteId: { S: noteId },
+    title: { S: input.title },
+    text: { S: input.text },
+    selected: { BOOL: input.selected },
+    createdAt: { S: now },
+    updatedAt: { S: now },
+  };
+  await dynamodb.send(new PutItemCommand({ TableName: TABLE_NAME, Item: item }));
+  return itemToPrenote(item);
+}
+
+async function updatePrenote(userId, noteId, body) {
+  requireNoteId(noteId);
+  const patch = updateInput(body);
+  const now = new Date().toISOString();
+  const names = { "#updatedAt": "updatedAt", "#gsi1sk": "GSI1SK" };
+  const values = {
+    ":updatedAt": { S: now },
+    ":gsi1sk": { S: "PRENOTE#" + now + "#" + noteId },
+  };
+  const updates = ["#updatedAt = :updatedAt", "#gsi1sk = :gsi1sk"];
+
+  if (Object.prototype.hasOwnProperty.call(patch, "title")) {
+    names["#title"] = "title";
+    values[":title"] = { S: patch.title };
+    updates.push("#title = :title");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "text")) {
+    names["#text"] = "text";
+    values[":text"] = { S: patch.text };
+    updates.push("#text = :text");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "selected")) {
+    names["#selected"] = "selected";
+    values[":selected"] = { BOOL: patch.selected };
+    updates.push("#selected = :selected");
+  }
+
+  const response = await dynamodb.send(new UpdateItemCommand({
+    TableName: TABLE_NAME,
+    Key: {
+      PK: { S: userPk(userId) },
+      SK: { S: noteSk(noteId) },
+    },
+    ConditionExpression: "attribute_exists(PK) AND attribute_exists(SK)",
+    UpdateExpression: "SET " + updates.join(", "),
+    ExpressionAttributeNames: names,
+    ExpressionAttributeValues: values,
+    ReturnValues: "ALL_NEW",
+  }));
+  return itemToPrenote(response.Attributes);
+}
+
+async function deletePrenote(userId, noteId) {
+  requireNoteId(noteId);
+  await dynamodb.send(new DeleteItemCommand({
+    TableName: TABLE_NAME,
+    Key: {
+      PK: { S: userPk(userId) },
+      SK: { S: noteSk(noteId) },
+    },
+  }));
+}
+
+function requireNoteId(noteId) {
+  if (!noteId || noteId.includes("#") || noteId.length > 120) {
+    throw new InputError("PRENOTE_ID_INVALID", "Prepared note id is invalid.");
+  }
+}
+
+function itemToPrenote(item) {
+  return {
+    id: item.noteId?.S || String(item.SK?.S || "").replace(PRENOTE_PREFIX, ""),
+    title: item.title?.S || "Prepared Note",
+    text: item.text?.S || "",
+    selected: Boolean(item.selected?.BOOL),
+    createdAt: item.createdAt?.S || "",
+    updatedAt: item.updatedAt?.S || item.createdAt?.S || "",
+  };
+}
+
+function json(statusCode, payload) {
+  return {
+    statusCode,
+    headers: JSON_HEADERS,
+    body: statusCode === 204 ? "" : JSON.stringify(payload),
+  };
+}
+`),
+      });
+
       if (!lambdaRole) {
         this.frontendBucket.grantRead(this.assetServer);
         const openAiSecret = aiProxyOpenAiSecretId.startsWith("arn:")
           ? secretsmanager.Secret.fromSecretCompleteArn(this, "OpenAiSecret", aiProxyOpenAiSecretId)
           : secretsmanager.Secret.fromSecretNameV2(this, "OpenAiSecret", aiProxyOpenAiSecretId);
         openAiSecret.grantRead(this.aiProxy);
+        this.prenoteApi.addToRolePolicy(new iam.PolicyStatement({
+          actions: [
+            "dynamodb:Query",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:DeleteItem",
+          ],
+          resources: [
+            cdk.Stack.of(this).formatArn({
+              service: "dynamodb",
+              resource: "table",
+              resourceName: prenoteTableName,
+            }),
+          ],
+        }));
       }
 
       const frontendIntegration = new integrations.HttpLambdaIntegration("FrontendAssetIntegration", this.assetServer);
       const aiProxyIntegration = new integrations.HttpLambdaIntegration("AiProxyIntegration", this.aiProxy);
+      const prenoteApiIntegration = new integrations.HttpLambdaIntegration("PrenoteApiIntegration", this.prenoteApi);
       this.httpsApi = new apigwv2.HttpApi(this, "FrontendHttpsApi", {
         apiName: `cueflow-frontend-${props.stage}`,
       });
@@ -568,6 +914,8 @@ function json(statusCode, payload) {
       this.httpsApi.addRoutes({ path: "/{proxy+}", methods: [apigwv2.HttpMethod.GET], integration: frontendIntegration });
       this.httpsApi.addRoutes({ path: "/ai/cue", methods: [apigwv2.HttpMethod.POST], integration: aiProxyIntegration });
       this.httpsApi.addRoutes({ path: "/ai/summary", methods: [apigwv2.HttpMethod.POST], integration: aiProxyIntegration });
+      this.httpsApi.addRoutes({ path: "/prenotes", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: prenoteApiIntegration });
+      this.httpsApi.addRoutes({ path: "/prenotes/{noteId}", methods: [apigwv2.HttpMethod.PUT, apigwv2.HttpMethod.DELETE, apigwv2.HttpMethod.OPTIONS], integration: prenoteApiIntegration });
     }
 
     new cdk.CfnOutput(this, "FrontendBucketName", { value: this.frontendBucket.bucketName });
@@ -819,6 +1167,7 @@ if (!skipFrontend) {
     mode: frontendMode,
     lambdaRoleArn: labRoleArn,
     openAiSecretId,
+    tableName: `CueFlowTable-${stage}`,
   });
 }
 const api = new ApiStack(app, `CueFlowApi-${stage}`, {

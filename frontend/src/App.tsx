@@ -20,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 
-type Screen = "home" | "settings" | "prenoteManager" | "live" | "history" | "conversationSettings";
+type Screen = "home" | "settings" | "prenoteManager" | "prenoteDetail" | "live" | "history" | "conversationSettings";
 type ConversationPage = "workspace" | "prenote";
 type CueCategory = "response" | "concept" | "suggestion" | "person";
 type SummaryStatus = "not_started" | "queued" | "running" | "ready" | "failed";
@@ -40,11 +40,14 @@ type Prenote = {
   title: string;
   text: string;
   selected: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 type PrenoteDraft = {
   title: string;
   text: string;
+  selected?: boolean;
 };
 
 type TranscriptLine = {
@@ -115,6 +118,15 @@ type AiSummaryJson = {
   }> | string[];
 };
 
+type PrenoteApiJson = {
+  id?: string;
+  title?: string;
+  text?: string;
+  selected?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 type AuthUser = {
   name: string;
   email: string;
@@ -167,6 +179,7 @@ const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["concept", "response", "suggestion", "person"];
 const AUTH_STORAGE_KEY = "cueflow.authUser";
 const DEFAULT_AI_ENDPOINT = "/ai";
+const DEFAULT_DATA_ENDPOINT = "";
 
 const DEFAULT_SETTINGS: ConversationSettings = {
   language: "english",
@@ -400,6 +413,87 @@ function configuredAiEndpoint(): string {
   return import.meta.env.VITE_CUEFLOW_AI_ENDPOINT?.trim() || DEFAULT_AI_ENDPOINT;
 }
 
+function configuredDataEndpoint(): string {
+  return import.meta.env.VITE_CUEFLOW_DATA_ENDPOINT?.trim() || DEFAULT_DATA_ENDPOINT;
+}
+
+function dataUrl(path: string): string {
+  const endpoint = configuredDataEndpoint().replace(/\/+$/, "");
+  return `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function userIdForApi(user: Pick<AuthUser, "email">): string {
+  return user.email.trim().toLowerCase();
+}
+
+function normalizePrenote(value: PrenoteApiJson): Prenote | null {
+  const id = cleanOneLine(value.id, 140);
+  const title = cleanOneLine(value.title, 160) || "Prepared Note";
+  const text = cleanParagraph(value.text, 12000);
+  if (!id) return null;
+  return {
+    id,
+    title,
+    text: text || title,
+    selected: Boolean(value.selected),
+    createdAt: cleanOneLine(value.createdAt, 80),
+    updatedAt: cleanOneLine(value.updatedAt, 80),
+  };
+}
+
+async function requestDataEndpoint<T>(
+  path: string,
+  user: AuthUser,
+  options: {
+    method?: "GET" | "POST" | "PUT" | "DELETE";
+    body?: unknown;
+  } = {},
+): Promise<T> {
+  const headers: Record<string, string> = {
+    "x-cueflow-user-id": userIdForApi(user),
+  };
+  if (options.body !== undefined) {
+    headers["content-type"] = "application/json";
+  }
+  const response = await fetch(dataUrl(path), {
+    method: options.method ?? "GET",
+    headers,
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+  });
+  if (!response.ok) throw new Error(`Data endpoint failed (${response.status}).`);
+  if (response.status === 204) return undefined as T;
+  return await response.json() as T;
+}
+
+async function listPrenotes(user: AuthUser): Promise<Prenote[]> {
+  const data = await requestDataEndpoint<{ prenotes?: PrenoteApiJson[] }>("/prenotes", user);
+  return (data.prenotes || []).map(normalizePrenote).filter((note): note is Prenote => Boolean(note));
+}
+
+async function createPrenoteApi(user: AuthUser, draft: Required<PrenoteDraft>): Promise<Prenote> {
+  const data = await requestDataEndpoint<{ prenote?: PrenoteApiJson }>("/prenotes", user, {
+    method: "POST",
+    body: draft,
+  });
+  const prenote = normalizePrenote(data.prenote || {});
+  if (!prenote) throw new Error("Prepared note response was invalid.");
+  return prenote;
+}
+
+async function updatePrenoteApi(user: AuthUser, id: string, patch: Partial<Required<PrenoteDraft>>): Promise<Prenote> {
+  const data = await requestDataEndpoint<{ prenote?: PrenoteApiJson }>(`/prenotes/${encodeURIComponent(id)}`, user, {
+    method: "PUT",
+    body: patch,
+  });
+  const prenote = normalizePrenote(data.prenote || {});
+  if (!prenote) throw new Error("Prepared note response was invalid.");
+  return prenote;
+}
+
+async function deletePrenoteApi(user: AuthUser, id: string): Promise<void> {
+  await requestDataEndpoint<void>(`/prenotes/${encodeURIComponent(id)}`, user, { method: "DELETE" });
+}
+
 function transcriptText(lines: TranscriptLine[]): string {
   return lines.map((line) => `[${line.time}] ${line.text}`).join("\n").trim();
 }
@@ -578,8 +672,12 @@ export default function App() {
   const [historyPage, setHistoryPage] = useState<ConversationPage>("workspace");
   const [settings, setSettings] = useState<ConversationSettings>(DEFAULT_SETTINGS);
   const [records, setRecords] = useState<ConversationRecord[]>(SAMPLE_RECORDS);
-  const [prenotes, setPrenotes] = useState<Prenote[]>(SAMPLE_PRENOTES);
-  const [prenoteDraft, setPrenoteDraft] = useState<PrenoteDraft>({ title: "", text: "" });
+  const [prenotes, setPrenotes] = useState<Prenote[]>([]);
+  const [prenotesLoading, setPrenotesLoading] = useState(false);
+  const [prenotesError, setPrenotesError] = useState("");
+  const [activePrenoteId, setActivePrenoteId] = useState<string | null>(null);
+  const [prenoteDetailDraft, setPrenoteDetailDraft] = useState<Required<PrenoteDraft>>({ title: "", text: "", selected: true });
+  const [isSavingPrenote, setIsSavingPrenote] = useState(false);
   const [cues, setCues] = useState<AiCue[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [activeRecordId, setActiveRecordId] = useState<string>("");
@@ -590,6 +688,7 @@ export default function App() {
   const [activeStartedAt, setActiveStartedAt] = useState<Date | null>(null);
   const [activeRecordTitle, setActiveRecordTitle] = useState("New conversation");
   const [swipedRecordId, setSwipedRecordId] = useState<string | null>(null);
+  const [swipedPrenoteId, setSwipedPrenoteId] = useState<string | null>(null);
   const [selectedCueDetail, setSelectedCueDetail] = useState<AiCue | null>(null);
 
   const activePrenote = useMemo(() => selectedPrenote(prenotes), [prenotes]);
@@ -608,6 +707,8 @@ export default function App() {
   const cueInFlightRef = useRef(false);
   const recordPointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const skipNextRecordClickRef = useRef(false);
+  const prenotePointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const skipNextPrenoteClickRef = useRef(false);
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -634,6 +735,33 @@ export default function App() {
       email: authUser.email,
     });
   }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) {
+      setPrenotes([]);
+      setPrenotesError("");
+      setPrenotesLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setPrenotesLoading(true);
+    setPrenotesError("");
+    void listPrenotes(authUser)
+      .then((items) => {
+        if (!cancelled) setPrenotes(items);
+      })
+      .catch((error) => {
+        if (!cancelled) setPrenotesError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setPrenotesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser?.email]);
 
   useEffect(() => () => {
     shouldListenRef.current = false;
@@ -801,40 +929,94 @@ export default function App() {
     }
   }
 
-  function togglePrenote(id: string) {
-    setPrenotes((current) => current.map((note) => note.id === id ? { ...note, selected: !note.selected } : note));
+  async function togglePrenote(id: string) {
+    if (!authUser) return;
+    const target = prenotes.find((note) => note.id === id);
+    if (!target) return;
+    const nextSelected = !target.selected;
+    setPrenotes((current) => current.map((note) => note.id === id ? { ...note, selected: nextSelected } : note));
+    setPrenotesError("");
+    try {
+      const updated = await updatePrenoteApi(authUser, id, { selected: nextSelected });
+      setPrenotes((current) => current.map((note) => note.id === id ? updated : note));
+    } catch (error) {
+      setPrenotes((current) => current.map((note) => note.id === id ? target : note));
+      setPrenotesError(error instanceof Error ? error.message : String(error));
+    }
   }
 
-  function addPrenote(event: React.FormEvent<HTMLFormElement>) {
+  function openPrenoteDetail(note: Prenote | null) {
+    setSwipedPrenoteId(null);
+    setPrenotesError("");
+    setActivePrenoteId(note?.id ?? null);
+    setPrenoteDetailDraft({
+      title: note?.title ?? "",
+      text: note?.text ?? "",
+      selected: note?.selected ?? true,
+    });
+    setScreen("prenoteDetail");
+  }
+
+  async function savePrenoteDetail(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const text = prenoteDraft.text.trim();
-    const explicitTitle = prenoteDraft.title.trim();
-    if (!text && !explicitTitle) return;
-    const title = explicitTitle || text.split(/\r?\n/).find(Boolean)?.slice(0, 48) || "Prepared Note";
-    const note: Prenote = {
-      id: `pn-${Date.now().toString(36)}`,
-      title,
-      text: text || title,
-      selected: true,
-    };
-    setPrenotes((current) => [note, ...current]);
-    setPrenoteDraft({ title: "", text: "" });
+    if (!authUser || isSavingPrenote) return;
+    const title = prenoteDetailDraft.title.trim();
+    const text = prenoteDetailDraft.text.trim();
+    if (!title && !text) {
+      setPrenotesError("Title or context is required.");
+      return;
+    }
+
+    setIsSavingPrenote(true);
+    setPrenotesError("");
+    try {
+      if (activePrenoteId) {
+        const updated = await updatePrenoteApi(authUser, activePrenoteId, {
+          title,
+          text,
+          selected: prenoteDetailDraft.selected,
+        });
+        setPrenotes((current) => current.map((note) => note.id === activePrenoteId ? updated : note));
+      } else {
+        const created = await createPrenoteApi(authUser, {
+          title,
+          text,
+          selected: prenoteDetailDraft.selected,
+        });
+        setPrenotes((current) => [created, ...current]);
+        setActivePrenoteId(created.id);
+      }
+      setScreen("prenoteManager");
+    } catch (error) {
+      setPrenotesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSavingPrenote(false);
+    }
   }
 
-  function updatePrenote(id: string, patch: Partial<Pick<Prenote, "title" | "text">>) {
-    setPrenotes((current) => current.map((note) => (
-      note.id === id
-        ? {
-            ...note,
-            title: patch.title !== undefined ? patch.title : note.title,
-            text: patch.text !== undefined ? patch.text : note.text,
-          }
-        : note
-    )));
-  }
-
-  function deletePrenote(id: string) {
+  async function deletePrenote(id: string) {
+    if (!authUser) return;
+    const removed = prenotes.find((note) => note.id === id);
+    const index = prenotes.findIndex((note) => note.id === id);
+    setSwipedPrenoteId(null);
     setPrenotes((current) => current.filter((note) => note.id !== id));
+    setPrenotesError("");
+    try {
+      await deletePrenoteApi(authUser, id);
+      if (activePrenoteId === id) {
+        setActivePrenoteId(null);
+        setScreen("prenoteManager");
+      }
+    } catch (error) {
+      if (removed) {
+        setPrenotes((current) => {
+          const next = [...current];
+          next.splice(Math.max(index, 0), 0, removed);
+          return next;
+        });
+      }
+      setPrenotesError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function submitAuth(event: React.FormEvent<HTMLFormElement>) {
@@ -895,6 +1077,10 @@ export default function App() {
     setActiveConversationId(null);
     activeConversationIdRef.current = null;
     setAuthUser(null);
+    setPrenotes([]);
+    setPrenotesError("");
+    setSwipedPrenoteId(null);
+    setActivePrenoteId(null);
     persistUser(null);
     setIsAccountOpen(false);
     setScreen("home");
@@ -1002,6 +1188,33 @@ export default function App() {
     if (Math.abs(deltaX) < 38 || Math.abs(deltaX) < Math.abs(deltaY)) return;
     skipNextRecordClickRef.current = true;
     setSwipedRecordId(deltaX < 0 ? id : null);
+  }
+
+  function handlePrenoteListClick(note: Prenote) {
+    if (skipNextPrenoteClickRef.current) {
+      skipNextPrenoteClickRef.current = false;
+      return;
+    }
+    if (swipedPrenoteId === note.id) {
+      setSwipedPrenoteId(null);
+      return;
+    }
+    openPrenoteDetail(note);
+  }
+
+  function handlePrenotePointerDown(id: string, event: { clientX: number; clientY: number }) {
+    prenotePointerRef.current = { id, x: event.clientX, y: event.clientY };
+  }
+
+  function handlePrenotePointerUp(id: string, event: { clientX: number; clientY: number }) {
+    const start = prenotePointerRef.current;
+    prenotePointerRef.current = null;
+    if (!start || start.id !== id) return;
+    const deltaX = event.clientX - start.x;
+    const deltaY = event.clientY - start.y;
+    if (Math.abs(deltaX) < 38 || Math.abs(deltaX) < Math.abs(deltaY)) return;
+    skipNextPrenoteClickRef.current = true;
+    setSwipedPrenoteId(deltaX < 0 ? id : null);
   }
 
   function handleRecordClick(id: string) {
@@ -1143,61 +1356,88 @@ export default function App() {
   if (screen === "prenoteManager") {
     return (
       <main className="phone-shell settings-page prenote-manager-page">
-        {renderHeader("Prepared Notes", <span />, "home")}
-        <section className="settings-section">
-          <h2>Add Prepared Note</h2>
-          <form className="prenote-create-form" onSubmit={addPrenote}>
-            <input
-              value={prenoteDraft.title}
-              placeholder="Title"
-              onChange={(event) => setPrenoteDraft({ ...prenoteDraft, title: event.target.value })}
-            />
-            <textarea
-              value={prenoteDraft.text}
-              placeholder="Context"
-              onChange={(event) => setPrenoteDraft({ ...prenoteDraft, text: event.target.value })}
-            />
-            <button type="submit" disabled={!prenoteDraft.title.trim() && !prenoteDraft.text.trim()}>
-              <Plus size={21} strokeWidth={1.8} />
-              Add Note
-            </button>
-          </form>
-        </section>
+        {renderHeader(
+          "Prepared Notes",
+          <button className="icon-button" type="button" aria-label="New prepared note" onClick={() => openPrenoteDetail(null)}>
+            <Plus size={25} strokeWidth={1.7} />
+          </button>,
+          "home",
+        )}
         <section className="settings-section">
           <div className="section-row compact">
             <h2>Manage Notes</h2>
             <span>{prenotes.length}</span>
           </div>
-          <div className="manage-note-list">
-            {prenotes.length ? prenotes.map((note) => (
-              <article className="manage-note-card" key={note.id}>
-                <label className="switch-row note-select-row">
-                  <span>Use in session</span>
-                  <input type="checkbox" checked={note.selected} onChange={() => togglePrenote(note.id)} />
-                </label>
-                <input
-                  value={note.title}
-                  aria-label={`${note.title || "Prepared note"} title`}
-                  onChange={(event) => updatePrenote(note.id, { title: event.target.value })}
-                  onBlur={() => {
-                    if (!note.title.trim()) updatePrenote(note.id, { title: "Prepared Note" });
-                  }}
-                />
-                <textarea
-                  value={note.text}
-                  aria-label={`${note.title || "Prepared note"} context`}
-                  onChange={(event) => updatePrenote(note.id, { text: event.target.value })}
-                  onBlur={() => {
-                    if (!note.text.trim()) updatePrenote(note.id, { text: note.title || "Prepared Note" });
-                  }}
-                />
-                <button className="delete-note-button" type="button" onClick={() => deletePrenote(note.id)}>
-                  <Trash2 size={20} strokeWidth={1.8} />
-                  Delete
-                </button>
-              </article>
-            )) : <p className="empty-note-state">-</p>}
-          </div>
+          {prenotesError && <p className="settings-error">{prenotesError}</p>}
+          {prenotesLoading ? (
+            <p className="empty-note-state">Loading</p>
+          ) : (
+            <div className="manage-note-list">
+              {prenotes.length ? prenotes.map((note) => (
+                <div className={swipedPrenoteId === note.id ? "prenote-list-row swiped" : "prenote-list-row"} key={note.id}>
+                  <button className="prenote-delete-button" type="button" onClick={() => void deletePrenote(note.id)}>
+                    Delete
+                  </button>
+                  <div
+                    className="prenote-list-card"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => handlePrenoteListClick(note)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") handlePrenoteListClick(note);
+                    }}
+                    onPointerDown={(event) => handlePrenotePointerDown(note.id, event)}
+                    onPointerUp={(event) => handlePrenotePointerUp(note.id, event)}
+                    onPointerCancel={() => {
+                      prenotePointerRef.current = null;
+                    }}
+                  >
+                    <span className={note.selected ? "note-checkbox checked" : "note-checkbox"}>{note.selected && <Check size={18} />}</span>
+                    <div>
+                      <h3>{note.title}</h3>
+                      <p>{note.text.split(/\r?\n/).slice(0, 2).join(" ")}</p>
+                    </div>
+                    <ChevronRight size={30} strokeWidth={1.45} />
+                  </div>
+                </div>
+              )) : <p className="empty-note-state">-</p>}
+            </div>
+          )}
+        </section>
+      </main>
+    );
+  }
+
+  if (screen === "prenoteDetail") {
+    return (
+      <main className="phone-shell settings-page prenote-detail-page">
+        {renderHeader(activePrenoteId ? "Prepared Note" : "New Note", <span />, "prenoteManager")}
+        <section className="settings-section">
+          <form className="prenote-detail-form" onSubmit={savePrenoteDetail}>
+            <input
+              value={prenoteDetailDraft.title}
+              placeholder="Title"
+              onChange={(event) => setPrenoteDetailDraft({ ...prenoteDetailDraft, title: event.target.value })}
+            />
+            <textarea
+              value={prenoteDetailDraft.text}
+              placeholder="Context"
+              onChange={(event) => setPrenoteDetailDraft({ ...prenoteDetailDraft, text: event.target.value })}
+            />
+            <label className="switch-row note-select-row">
+              <span>Use in session</span>
+              <input
+                type="checkbox"
+                checked={prenoteDetailDraft.selected}
+                onChange={(event) => setPrenoteDetailDraft({ ...prenoteDetailDraft, selected: event.target.checked })}
+              />
+            </label>
+            {prenotesError && <p className="settings-error">{prenotesError}</p>}
+            <button className="save-note-button" type="submit" disabled={isSavingPrenote || (!prenoteDetailDraft.title.trim() && !prenoteDetailDraft.text.trim())}>
+              <Check size={21} strokeWidth={1.8} />
+              {isSavingPrenote ? "Saving" : "Save"}
+            </button>
+          </form>
         </section>
       </main>
     );
@@ -1447,13 +1687,19 @@ export default function App() {
           </button>
         </div>
         <div className="prenote-row">
-          {prenotes.map((note) => (
-            <button className="prenote-card" key={note.id} onClick={() => togglePrenote(note.id)}>
+          {prenotes.length ? prenotes.map((note) => (
+            <button className="prenote-card" key={note.id} onClick={() => void togglePrenote(note.id)}>
               <span className={note.selected ? "note-checkbox checked" : "note-checkbox"}>{note.selected && <Check size={18} />}</span>
               <h3>{note.title}</h3>
               <p>{note.text.split(/\r?\n/).slice(0, 2).join(" ")}</p>
             </button>
-          ))}
+          )) : (
+            <button className="prenote-card" type="button" onClick={() => setScreen("prenoteManager")}>
+              <span className="note-checkbox" />
+              <h3>-</h3>
+              <p>-</p>
+            </button>
+          )}
         </div>
       </section>
     </main>
