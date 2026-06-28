@@ -66,6 +66,8 @@ export {
   type ConversationServiceOptions,
   type CreateConversationInput,
   type EndConversationResult,
+  type EndConversationOptions,
+  type GenerateSummaryOptions,
   type GenerateSummaryResult,
   type ListConversationsInput,
   type RecordCueInput,
@@ -156,4 +158,5 @@ export type {
   CueContextWindow,
   CueProviderResult,
   SummaryProviderResult,
+  SummaryProviderOptions,
 } from "./ai/types.js";

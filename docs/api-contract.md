@@ -38,6 +38,14 @@ Returns saved cue cards for a conversation.
 
 Marks the conversation ended, stores the full transcript object, and enqueues summary generation.
 
+Optional request body:
+
+```json
+{
+  "promptContext": "Prepared context: Course Rubric\nExplain cloud-native reliability and serverless trade-offs."
+}
+```
+
 Response fields:
 - `conversation`
 - `transcriptObjectKey`
@@ -77,9 +85,12 @@ Request:
   "chunkId": "000001",
   "speaker": "speaker_1",
   "text": "Should we use WebSocket or REST polling for real-time AI cues?",
-  "clientTimestamp": "2026-06-16T10:00:05.000Z"
+  "clientTimestamp": "2026-06-16T10:00:05.000Z",
+  "promptContext": "Prepared context: Architecture Brief\nDiscuss WebSocket ingestion and S3 transcript storage."
 }
 ```
+
+`promptContext` is optional. When present, it is copied to any cue job created from that transcript window and passed to the AI provider.
 
 Ack event:
 

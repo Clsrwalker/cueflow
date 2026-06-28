@@ -174,7 +174,9 @@ export function createRestHandler(
         }
 
         if (route.method === "POST" && child === "end") {
-          const result = await service.endConversation(conversationId);
+          const body = parseJsonBody(event);
+          const promptContext = optionalString(body, "promptContext")?.trim() || undefined;
+          const result = await service.endConversation(conversationId, { promptContext });
           const shouldEnqueueSummary = result.conversation.summaryStatus !== "READY"
             && options.summaryQueue
             && !(await options.summaryQueue.hasPendingSummaryJob(conversationId));
@@ -183,6 +185,7 @@ export function createRestHandler(
                 jobId: `summaryjob_${idFactory()}`,
                 conversationId,
                 enqueuedAt: clock().toISOString(),
+                ...(result.promptContext ? { promptContext: result.promptContext } : {}),
               })
             : null;
           return json(200, {

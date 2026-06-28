@@ -87,6 +87,7 @@ describe("WebSocketService", () => {
       speaker: "speaker_1",
       text: "Should we use WebSocket push or REST polling for live cue delivery?",
       clientTimestamp: "2026-06-16T10:00:04.000Z",
+      promptContext: "Prepared context: Course Rubric\nExplain cloud-native trade-offs.",
     });
     const second = await websockets.sendTranscript("conn_001", {
       action: "sendTranscript",
@@ -102,6 +103,7 @@ describe("WebSocketService", () => {
       reasons: expect.arrayContaining(["QUESTION", "KEYWORD"]),
       sourceChunkStart: "000001",
       sourceChunkEnd: "000001",
+      promptContext: "Prepared context: Course Rubric\nExplain cloud-native trade-offs.",
     });
     expect(second.cueJob).toBeNull();
     expect(queue.listJobsForTest()).toHaveLength(1);

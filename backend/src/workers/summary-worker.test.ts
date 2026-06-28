@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { AiProvider } from "../ai/types.js";
+import type { AiProvider, SummaryProviderOptions } from "../ai/types.js";
 import { ConversationService } from "../services/conversation-service.js";
 import { InMemorySummaryJobQueue } from "../queues/in-memory-summary-job-queue.js";
 import { InMemoryCueFlowStore } from "../storage/in-memory-store.js";
@@ -90,5 +90,45 @@ describe("SummaryWorker", () => {
     await expect(conversations.getConversation(conversation.conversationId)).resolves.toMatchObject({
       summaryStatus: "FAILED",
     });
+  });
+
+  test("passes prepared note prompt context to summary generation", async () => {
+    let receivedOptions: SummaryProviderOptions | undefined;
+    const provider: AiProvider = {
+      async generateCue() {
+        throw new Error("cue is not used");
+      },
+      async generateSummary(_chunks, options) {
+        receivedOptions = options;
+        return {
+          summary: "The summary used prepared context.",
+          keyTopics: ["Prepared notes"],
+          actionItems: ["Use the selected prenote as prompt context."],
+          risks: ["No major risks were explicitly identified."],
+        };
+      },
+    };
+    const { conversations, queue, worker } = setup(provider);
+    const conversation = await conversations.createConversation();
+    await conversations.appendTranscriptChunk({
+      conversationId: conversation.conversationId,
+      chunkId: "000001",
+      speaker: "speaker_1",
+      text: "We should explain the serverless trade-offs.",
+    });
+    await conversations.endConversation(conversation.conversationId, {
+      promptContext: "Prepared context: Course Rubric\nExplain cloud-native requirements.",
+    });
+    await queue.enqueueSummaryJob({
+      jobId: "summaryjob_001",
+      conversationId: conversation.conversationId,
+      enqueuedAt: "2026-06-16T10:00:03.000Z",
+      promptContext: "Prepared context: Course Rubric\nExplain cloud-native requirements.",
+    });
+
+    const result = await worker.processNext();
+
+    expect(result.status).toBe("COMPLETED");
+    expect(receivedOptions?.promptContext).toBe("Prepared context: Course Rubric\nExplain cloud-native requirements.");
   });
 });

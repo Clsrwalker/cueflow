@@ -77,6 +77,7 @@ export class CueWorker {
       const generated = await this.aiProvider.generateCue({
         conversationId: job.conversationId,
         chunks: cueContext,
+        promptContext: job.promptContext,
       });
       const latencyMs = Math.max(0, this.clock().getTime() - startedAt);
       const cue: Cue = {

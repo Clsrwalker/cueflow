@@ -46,12 +46,14 @@ Open `http://localhost:5174`.
 ## Demo Steps
 
 1. Open the Sessions home page.
-2. Review My Records and Prepared Notes.
+2. Review My Records and select any Prepared Notes that should be used as prompt context.
 3. Click Start.
 4. Allow microphone access and speak.
 5. Watch Transcript update inside the live Conversation page.
 6. Use Pause/Resume or End from the bottom action bar.
 7. Review the saved summary, transcript, and AI cues from the session record.
+
+Selected Prepared Notes are passed into local cue/summary generation as prompt context. The backend WebSocket cue path and REST summary path also accept optional `promptContext` and pass it to the configured AI provider.
 
 The frontend uses browser speech recognition on HTTPS or localhost. The UI still works without cloud deployment, while backend provider abstractions are available for deployed REST/WebSocket runtimes.
 

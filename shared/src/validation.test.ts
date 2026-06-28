@@ -10,12 +10,14 @@ describe("CueFlow validation helpers", () => {
       speaker: "speaker_1",
       text: "Should we use WebSocket or REST polling for AI cues?",
       clientTimestamp: "2026-06-16T10:00:05.000Z",
+      promptContext: " Course rubric: discuss serverless trade-offs. ",
     });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.conversationId).toBe("c_001");
       expect(result.value.text).toContain("WebSocket");
+      expect(result.value.promptContext).toBe("Course rubric: discuss serverless trade-offs.");
     }
   });
 
@@ -68,4 +70,3 @@ describe("CueFlow validation helpers", () => {
     expect(result.ok).toBe(true);
   });
 });
-

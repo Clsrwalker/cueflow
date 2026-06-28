@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { fullTranscriptS3Key } from "@cueflow/shared";
-import type { AiProvider } from "../ai/types.js";
+import type { AiProvider, SummaryProviderOptions } from "../ai/types.js";
 import { InMemoryCueFlowStore } from "../storage/in-memory-store.js";
 import {
   ConversationClosedError,
@@ -128,5 +128,42 @@ describe("ConversationService", () => {
       status: "ENDED",
       summaryStatus: "FAILED",
     });
+  });
+
+  test("passes prepared note prompt context to summary providers", async () => {
+    let receivedOptions: SummaryProviderOptions | undefined;
+    const provider: AiProvider = {
+      async generateCue() {
+        throw new Error("cue generation is not used in this test");
+      },
+      async generateSummary(_chunks, options) {
+        receivedOptions = options;
+        return {
+          summary: "The summary used prepared notes.",
+          keyTopics: ["Prepared notes"],
+          actionItems: ["Use prompt context for the next answer."],
+          risks: ["No major risks were explicitly identified."],
+        };
+      },
+    };
+    const service = new ConversationService(new InMemoryCueFlowStore(), {
+      clock: () => new Date("2026-06-16T10:00:00.000Z"),
+      idFactory: () => "000001",
+      aiProvider: provider,
+    });
+    const conversation = await service.createConversation();
+    await service.appendTranscriptChunk({
+      conversationId: conversation.conversationId,
+      chunkId: "000001",
+      speaker: "speaker_1",
+      text: "We should explain the CueFlow cloud architecture.",
+    });
+    await service.endConversation(conversation.conversationId);
+
+    await service.generateSummary(conversation.conversationId, {
+      promptContext: "Prepared context: Architecture Brief\nDiscuss WebSocket ingestion and S3 storage.",
+    });
+
+    expect(receivedOptions?.promptContext).toBe("Prepared context: Architecture Brief\nDiscuss WebSocket ingestion and S3 storage.");
   });
 });

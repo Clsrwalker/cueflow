@@ -12,6 +12,7 @@ export type CueJob = {
   reasons: CueTriggerReason[];
   wordCount: number;
   enqueuedAt: string;
+  promptContext?: string;
 };
 
 export type StoredCueJob = CueJob & {
@@ -32,6 +33,7 @@ export type SummaryJob = {
   jobId: string;
   conversationId: string;
   enqueuedAt: string;
+  promptContext?: string;
 };
 
 export type StoredSummaryJob = SummaryJob & {

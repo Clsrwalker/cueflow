@@ -7,16 +7,12 @@ import {
   Lightbulb,
   MoreHorizontal,
   Pause,
-  Plus,
   Settings2,
-  Square,
-  Trash2,
-  Upload,
   UserRound,
   X,
 } from "lucide-react";
 
-type Screen = "home" | "settings" | "noteEditor" | "live" | "history" | "conversationSettings";
+type Screen = "home" | "settings" | "live" | "history" | "conversationSettings";
 type ConversationTab = "summary" | "transcript" | "prenote";
 type CueCategory = "response" | "concept" | "suggestion" | "person";
 type SummaryStatus = "not_started" | "queued" | "running" | "ready" | "failed";
@@ -31,19 +27,11 @@ type AiCue = {
   source: "manual" | "auto";
 };
 
-type PrenoteFile = {
-  id: string;
-  name: string;
-  sizeBytes: number;
-  status: "ready" | "pending" | "error";
-};
-
 type Prenote = {
   id: string;
   title: string;
   text: string;
   selected: boolean;
-  files: PrenoteFile[];
 };
 
 type TranscriptLine = {
@@ -128,8 +116,6 @@ type SpeechRecognitionLike = {
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
-const MAX_FILES = 5;
-const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["concept", "response", "suggestion", "person"];
 
@@ -145,14 +131,12 @@ const SAMPLE_PRENOTES: Prenote[] = [
     title: "Architecture Brief",
     text: "Discuss CueFlow as a mobile-first cloud-native conversation intelligence platform. Cover WebSocket ingestion, async AI cue generation, DynamoDB metadata, and S3 transcript storage.",
     selected: true,
-    files: [],
   },
   {
     id: "pn-rubric",
     title: "Course Rubric",
     text: "Be ready to explain cloud-native design, serverless trade-offs, monitoring, reliability, and cost controls.",
     selected: false,
-    files: [],
   },
 ];
 
@@ -229,13 +213,7 @@ function selectedPrenote(prenotes: Prenote[]): Prenote | null {
     title: "Selected Notes",
     text: selected.map((note) => `# ${note.title}\n${note.text}`).join("\n\n---\n\n"),
     selected: true,
-    files: selected.flatMap((note) => note.files),
   };
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function formatClock(value: Date): string {
@@ -297,18 +275,25 @@ function words(value: string): number {
   return value.match(/[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g)?.length ?? 0;
 }
 
-function buildCue(lines: TranscriptLine[]): AiCue {
+function promptContextFromPrenote(prenote: Prenote | null): string {
+  if (!prenote) return "";
+  return `Prepared context: ${prenote.title}\n${prenote.text}`.trim();
+}
+
+function buildCue(lines: TranscriptLine[], prenote: Prenote | null): AiCue {
   const text = lines.map((line) => line.text).join(" ");
-  const lower = text.toLowerCase();
+  const promptContext = promptContextFromPrenote(prenote);
+  const lower = `${promptContext}\n${text}`.toLowerCase();
   const id = `cue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   const createdAt = new Date().toISOString();
+  const contextLead = prenote ? `Using "${prenote.title}" as prepared context, ` : "";
 
   if (/\b(risk|failure|latency|cost|security|reliability|slow)\b/.test(lower)) {
     return {
       id,
       category: "suggestion",
       title: "Risk to address",
-      output: "The conversation is surfacing operational risk. Capture the mitigation before the topic moves on.",
+      output: `${contextLead}the conversation is surfacing operational risk. Capture the mitigation before the topic moves on.`,
       createdAt,
       source: "auto",
     };
@@ -319,7 +304,7 @@ function buildCue(lines: TranscriptLine[]): AiCue {
       id,
       category: "response",
       title: "Possible next response",
-      output: "Ask for the owner, timeline, and expected outcome so this becomes a concrete action item.",
+      output: `${contextLead}ask for the owner, timeline, and expected outcome so this becomes a concrete action item.`,
       createdAt,
       source: "auto",
     };
@@ -330,7 +315,18 @@ function buildCue(lines: TranscriptLine[]): AiCue {
       id,
       category: "concept",
       title: "Architecture concept",
-      output: "Separate live ingestion, durable storage, and AI processing so each cloud component has one clear responsibility.",
+      output: `${contextLead}separate live ingestion, durable storage, and AI processing so each cloud component has one clear responsibility.`,
+      createdAt,
+      source: "auto",
+    };
+  }
+
+  if (prenote) {
+    return {
+      id,
+      category: "concept",
+      title: "Use prepared context",
+      output: `Use "${prenote.title}" as the prompt context for the next answer: ${prenote.text.slice(0, 140)}`,
       createdAt,
       source: "auto",
     };
@@ -346,17 +342,29 @@ function buildCue(lines: TranscriptLine[]): AiCue {
   };
 }
 
-function shouldGenerateCue(lines: TranscriptLine[], cues: AiCue[]): boolean {
+function shouldGenerateCue(lines: TranscriptLine[], cues: AiCue[], prenote: Prenote | null): boolean {
   const lastCue = cues[0];
   const recent = lastCue ? lines.slice(-3) : lines.slice(-2);
   const text = recent.map((line) => line.text).join(" ");
-  return words(text) >= 18 || /[?]/.test(text) || /\b(risk|should|decision|latency|cloud|api|next)\b/i.test(text);
+  const contextText = promptContextFromPrenote(prenote);
+  return words(text) >= 18
+    || Boolean(prenote && words(text) >= 8)
+    || /[?]/.test(text)
+    || /\b(risk|should|decision|latency|cloud|api|next)\b/i.test(`${contextText}\n${text}`);
 }
 
-function buildSummary(record: Pick<ConversationRecord, "title" | "transcript" | "cueHistory">): ConversationSummary {
+function buildSummary(record: Pick<ConversationRecord, "title" | "transcript" | "cueHistory" | "usedPrenote">): ConversationSummary {
   const text = record.transcript.map((line) => line.text).join(" ");
-  const lower = text.toLowerCase();
+  const promptContext = promptContextFromPrenote(record.usedPrenote ?? null);
+  const lower = `${promptContext}\n${text}`.toLowerCase();
   const keyPoints: ConversationSummaryKeyPoint[] = [];
+  if (record.usedPrenote) {
+    keyPoints.push({
+      id: "kp-prenote",
+      title: "Prepared context used",
+      details: [`Prompt context came from "${record.usedPrenote.title}".`],
+    });
+  }
   if (/\b(websocket|live|real-time|transcript)\b/.test(lower)) {
     keyPoints.push({
       id: "kp-live",
@@ -411,7 +419,6 @@ export default function App() {
   const [liveTab, setLiveTab] = useState<ConversationTab>("transcript");
   const [historyTab, setHistoryTab] = useState<ConversationTab>("summary");
   const [activeRecordId, setActiveRecordId] = useState<string>("");
-  const [noteDraft, setNoteDraft] = useState<Prenote | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [connectionStatus, setConnectionStatus] = useState("ready");
@@ -578,10 +585,10 @@ export default function App() {
   }
 
   function maybeQueueCue(nextTranscript: TranscriptLine[]) {
-    if (!settings.autoCue || cueTimerRef.current || !shouldGenerateCue(nextTranscript, cuesRef.current)) return;
+    if (!settings.autoCue || cueTimerRef.current || !shouldGenerateCue(nextTranscript, cuesRef.current, activePrenote)) return;
     setConnectionStatus("cue queued");
     cueTimerRef.current = window.setTimeout(() => {
-      const cue = buildCue(nextTranscript.slice(-4));
+      const cue = buildCue(nextTranscript.slice(-4), activePrenote);
       const nextCues = [cue, ...cuesRef.current];
       cuesRef.current = nextCues;
       setCues(nextCues);
@@ -592,50 +599,6 @@ export default function App() {
 
   function togglePrenote(id: string) {
     setPrenotes((current) => current.map((note) => note.id === id ? { ...note, selected: !note.selected } : note));
-  }
-
-  function openNewNote() {
-    setNoteDraft({
-      id: `pn-${Date.now()}`,
-      title: "New Note",
-      text: "",
-      selected: true,
-      files: [],
-    });
-    setScreen("noteEditor");
-  }
-
-  function saveNoteDraft() {
-    if (!noteDraft) return;
-    const firstLine = noteDraft.text.split(/\r?\n/).find((line) => line.trim())?.trim();
-    const nextNote = {
-      ...noteDraft,
-      title: firstLine ? firstLine.replace(/^#+\s*/, "").slice(0, 48) : noteDraft.title,
-    };
-    setPrenotes((current) => [nextNote, ...current.filter((note) => note.id !== nextNote.id)]);
-    setNoteDraft(null);
-    setScreen("home");
-  }
-
-  function addFiles(files: FileList | null) {
-    if (!noteDraft || !files?.length) return;
-    const existing = noteDraft.files;
-    const next: PrenoteFile[] = [];
-    for (const file of Array.from(files)) {
-      if (existing.length + next.length >= MAX_FILES) break;
-      if (file.size > MAX_FILE_SIZE) continue;
-      next.push({
-        id: `file-${Date.now()}-${next.length}`,
-        name: file.name,
-        sizeBytes: file.size,
-        status: "ready",
-      });
-    }
-    setNoteDraft({
-      ...noteDraft,
-      files: [...existing, ...next],
-      text: noteDraft.text || "Uploaded files will be summarized into prepared-note context in a later backend phase.",
-    });
   }
 
   function startConversation() {
@@ -796,59 +759,6 @@ export default function App() {
     );
   }
 
-  if (screen === "noteEditor" && noteDraft) {
-    return (
-      <main className="phone-shell modal-page">
-        <header className="modal-header">
-          <h1>New Note</h1>
-          <button className="icon-button" aria-label="Cancel" onClick={() => setScreen("home")}>
-            <X size={37} strokeWidth={1.35} />
-          </button>
-        </header>
-        <section className="note-editor">
-          <textarea
-            maxLength={5000}
-            value={noteDraft.text}
-            placeholder="Add context that CueFlow should remember during the live session."
-            onChange={(event) => setNoteDraft({ ...noteDraft, text: event.target.value })}
-          />
-          <span className="char-count">{noteDraft.text.length}/5000</span>
-        </section>
-        <section className="file-section">
-          <label className="file-add">
-            <Plus size={32} strokeWidth={1.6} />
-            <input
-              type="file"
-              multiple
-              accept=".txt,.md,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.heic"
-              onChange={(event) => addFiles(event.target.files)}
-            />
-          </label>
-          <p>Attach up to 5 files. Each file can be up to 5 MB.</p>
-          {noteDraft.files.map((file) => (
-            <div className="file-pill" key={file.id}>
-              <Upload size={17} />
-              <span>{file.name}</span>
-              <small>{formatFileSize(file.sizeBytes)}</small>
-            </div>
-          ))}
-        </section>
-        <section className="note-info">
-          <Square size={23} strokeWidth={1.5} />
-          <p>Prepared notes help CueFlow generate more relevant cues and summaries during the session.</p>
-        </section>
-        <footer className="bottom-actions">
-          <button className="soft-danger" onClick={() => setNoteDraft(null)}>
-            Delete
-          </button>
-          <button className="muted-action" disabled={!noteDraft.text.trim() && !noteDraft.files.length} onClick={saveNoteDraft}>
-            Save
-          </button>
-        </footer>
-      </main>
-    );
-  }
-
   if (screen === "conversationSettings") {
     return (
       <main className="phone-shell settings-page">
@@ -979,9 +889,6 @@ export default function App() {
       <section className="prenote-dock">
         <h2>Prepared Notes</h2>
         <div className="prenote-row">
-          <button className="add-note-card" onClick={openNewNote}>
-            <Plus size={45} strokeWidth={1.45} />
-          </button>
           {prenotes.map((note) => (
             <button className="prenote-card" key={note.id} onClick={() => togglePrenote(note.id)}>
               <span className={note.selected ? "note-checkbox checked" : "note-checkbox"}>{note.selected && <Check size={18} />}</span>

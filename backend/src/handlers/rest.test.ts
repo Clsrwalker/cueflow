@@ -67,7 +67,13 @@ describe("REST handler", () => {
 
     const detailResponse = await handler({ httpMethod: "GET", path: `/conversations/${conversation.conversationId}` });
     const cuesResponse = await handler({ httpMethod: "GET", path: `/conversations/${conversation.conversationId}/cues` });
-    const endResponse = await handler({ httpMethod: "POST", path: `/conversations/${conversation.conversationId}/end` });
+    const endResponse = await handler({
+      httpMethod: "POST",
+      path: `/conversations/${conversation.conversationId}/end`,
+      body: JSON.stringify({
+        promptContext: "Prepared context: Course Rubric\nExplain cloud-native reliability.",
+      }),
+    });
 
     expect(detailResponse.statusCode).toBe(200);
     expect(parseBody<{ conversation: { status: string } }>(detailResponse).conversation.status).toBe("ACTIVE");
@@ -79,6 +85,7 @@ describe("REST handler", () => {
       summaryJobEnqueued: true,
     });
     expect(summaryQueue.listJobsForTest()).toHaveLength(1);
+    expect(summaryQueue.listJobsForTest()[0].promptContext).toBe("Prepared context: Course Rubric\nExplain cloud-native reliability.");
     await service.generateSummary(conversation.conversationId);
     const summaryResponse = await handler({ httpMethod: "GET", path: `/conversations/${conversation.conversationId}/summary` });
     expect(summaryResponse.statusCode).toBe(200);

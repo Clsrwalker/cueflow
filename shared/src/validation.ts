@@ -13,6 +13,16 @@ function readRequiredString(input: Record<string, unknown>, field: string, error
   return value.trim();
 }
 
+function readOptionalString(input: Record<string, unknown>, field: string, errors: string[]): string | undefined {
+  const value = input[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    errors.push(`${field} must be a string`);
+    return undefined;
+  }
+  return value.trim() || undefined;
+}
+
 function isIsoLike(value: string): boolean {
   const time = Date.parse(value);
   return Number.isFinite(time);
@@ -30,6 +40,7 @@ export function validateSendTranscriptMessage(input: unknown): ValidationResult<
   const speaker = readRequiredString(input, "speaker", errors);
   const text = readRequiredString(input, "text", errors);
   const clientTimestamp = readRequiredString(input, "clientTimestamp", errors);
+  const promptContext = readOptionalString(input, "promptContext", errors);
 
   if (action && action !== "sendTranscript") {
     errors.push("action must be sendTranscript");
@@ -49,6 +60,7 @@ export function validateSendTranscriptMessage(input: unknown): ValidationResult<
       speaker,
       text,
       clientTimestamp,
+      ...(promptContext ? { promptContext } : {}),
     },
   };
 }
@@ -72,4 +84,3 @@ export function validateSummaryResult(input: ConversationSummary): ValidationRes
   if (!Array.isArray(input.risks)) errors.push("summary risks must be an array");
   return errors.length ? { ok: false, errors } : { ok: true, value: input };
 }
-

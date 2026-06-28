@@ -34,7 +34,9 @@ export class SummaryWorker {
 
   async processJob(job: StoredSummaryJob): Promise<SummaryWorkerResult> {
     try {
-      const result = await this.conversations.generateSummary(job.conversationId);
+      const result = await this.conversations.generateSummary(job.conversationId, {
+        promptContext: job.promptContext,
+      });
       const deliveredCount = await publishToConversationConnections(
         this.store,
         this.messenger,

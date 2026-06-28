@@ -3,10 +3,11 @@ import type OpenAI from "openai";
 import { chunk } from "../test-helpers.js";
 import { OpenAiProvider } from "./openai-provider.js";
 
-function fakeClient(outputText: string): OpenAI {
+function fakeClient(outputText: string, calls: unknown[] = []): OpenAI {
   return {
     responses: {
-      async create() {
+      async create(input: unknown) {
+        calls.push(input);
         return {
           output_text: outputText,
         };
@@ -71,5 +72,50 @@ describe("OpenAiProvider", () => {
     });
 
     await expect(provider.generateSummary([])).rejects.toThrow("Summary response was not valid JSON.");
+  });
+
+  test("includes prepared context in cue prompts", async () => {
+    const calls: unknown[] = [];
+    const provider = new OpenAiProvider({
+      client: fakeClient(JSON.stringify({
+        type: "CONCEPT",
+        title: "Prepared context",
+        shortText: "Use the rubric context.",
+        detailText: "Tie the cue to the selected prepared note.",
+        confidence: 0.8,
+      }), calls),
+    });
+
+    await provider.generateCue({
+      conversationId: "conv_001",
+      promptContext: "Course rubric: explain serverless trade-offs.",
+      chunks: [
+        chunk({ conversationId: "conv_001", chunkId: "000001", text: "We need to explain this clearly." }),
+      ],
+    });
+
+    expect(JSON.stringify(calls[0])).toContain("Prepared context:");
+    expect(JSON.stringify(calls[0])).toContain("Course rubric: explain serverless trade-offs.");
+    expect(JSON.stringify(calls[0])).toContain("Transcript:");
+  });
+
+  test("includes prepared context in summary prompts", async () => {
+    const calls: unknown[] = [];
+    const provider = new OpenAiProvider({
+      client: fakeClient(JSON.stringify({
+        summary: "The session used prepared context.",
+        keyTopics: ["Prepared rubric"],
+        actionItems: ["Mention the rubric in the demo."],
+        risks: ["No major risks."],
+      }), calls),
+    });
+
+    await provider.generateSummary([
+      chunk({ conversationId: "conv_001", chunkId: "000001", text: "We should cover the grading criteria." }),
+    ], {
+      promptContext: "Prepared note: grading criteria and cloud-native requirements.",
+    });
+
+    expect(JSON.stringify(calls[0])).toContain("Prepared note: grading criteria and cloud-native requirements.");
   });
 });

@@ -174,6 +174,7 @@ export class WebSocketService {
           reasons: evaluation.reasons,
           wordCount: evaluation.wordCount,
           enqueuedAt: this.nowIso(),
+          ...(validation.value.promptContext ? { promptContext: validation.value.promptContext } : {}),
         })
       : null;
 

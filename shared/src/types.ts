@@ -62,6 +62,7 @@ export type WebSocketSendTranscriptMessage = {
   speaker: string;
   text: string;
   clientTimestamp: string;
+  promptContext?: string;
 };
 
 export type WebSocketPingMessage = {

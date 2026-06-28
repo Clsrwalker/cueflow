@@ -47,11 +47,20 @@ export type RecordCueInput = {
 export type EndConversationResult = {
   conversation: Conversation;
   transcriptObjectKey: string;
+  promptContext?: string;
 };
 
 export type GenerateSummaryResult = {
   conversation: Conversation;
   summary: ConversationSummary;
+};
+
+export type EndConversationOptions = {
+  promptContext?: string;
+};
+
+export type GenerateSummaryOptions = {
+  promptContext?: string;
 };
 
 export class ConversationServiceError extends Error {
@@ -204,7 +213,7 @@ export class ConversationService {
     return this.store.listCues(conversation.conversationId);
   }
 
-  async endConversation(conversationId: string): Promise<EndConversationResult> {
+  async endConversation(conversationId: string, options: EndConversationOptions = {}): Promise<EndConversationResult> {
     const conversation = await this.getConversation(conversationId);
     const endedAt = conversation.endedAt ?? this.nowIso();
     const pending = await this.store.updateConversation(conversation.conversationId, {
@@ -223,10 +232,11 @@ export class ConversationService {
     return {
       conversation: pending,
       transcriptObjectKey,
+      ...(options.promptContext?.trim() ? { promptContext: options.promptContext.trim() } : {}),
     };
   }
 
-  async generateSummary(conversationId: string): Promise<GenerateSummaryResult> {
+  async generateSummary(conversationId: string, options: GenerateSummaryOptions = {}): Promise<GenerateSummaryResult> {
     const conversation = await this.getConversation(conversationId);
     await this.store.updateConversation(conversation.conversationId, {
       status: "ENDED",
@@ -237,7 +247,7 @@ export class ConversationService {
     const chunks = await this.store.listTranscriptChunks(conversation.conversationId);
     await this.store.putFullTranscript(conversation.conversationId, chunks);
 
-    const generated = await this.generateSummaryContent(conversation.conversationId, chunks);
+    const generated = await this.generateSummaryContent(conversation.conversationId, chunks, options.promptContext);
     const summary: ConversationSummary = {
       conversationId: conversation.conversationId,
       ...generated,
@@ -272,9 +282,9 @@ export class ConversationService {
     return this.clock().toISOString();
   }
 
-  private async generateSummaryContent(conversationId: string, chunks: TranscriptChunk[]): Promise<SummaryProviderResult> {
+  private async generateSummaryContent(conversationId: string, chunks: TranscriptChunk[], promptContext?: string): Promise<SummaryProviderResult> {
     try {
-      return await this.aiProvider.generateSummary(chunks);
+      return await this.aiProvider.generateSummary(chunks, { promptContext });
     } catch (error) {
       await this.store.updateConversation(conversationId, {
         summaryStatus: "FAILED",

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { AiProvider } from "../ai/types.js";
+import type { AiProvider, CueContextWindow } from "../ai/types.js";
 import { ConversationService } from "../services/conversation-service.js";
 import { InMemoryCueJobQueue } from "../queues/in-memory-cue-job-queue.js";
 import { InMemoryCueFlowStore } from "../storage/in-memory-store.js";
@@ -107,5 +107,50 @@ describe("CueWorker", () => {
       error: "provider unavailable",
     });
     expect(queue.listJobsForTest()[0]).toMatchObject({ status: "FAILED", lastError: "provider unavailable" });
+  });
+
+  test("passes prepared note prompt context to the AI provider", async () => {
+    let receivedContext: CueContextWindow | null = null;
+    const provider: AiProvider = {
+      async generateCue(contextWindow) {
+        receivedContext = contextWindow;
+        return {
+          type: "CONCEPT",
+          title: "Prepared context",
+          shortText: "The cue used the selected prepared note.",
+          detailText: "The provider received prompt context from the cue job.",
+          sourceChunkStart: "000001",
+          sourceChunkEnd: "000001",
+          confidence: 0.91,
+        };
+      },
+      async generateSummary() {
+        throw new Error("summary is not used");
+      },
+    };
+    const { conversations, queue, worker } = setup(provider);
+    const conversation = await conversations.createConversation();
+    await conversations.appendTranscriptChunk({
+      conversationId: conversation.conversationId,
+      chunkId: "000001",
+      speaker: "speaker_1",
+      text: "Should we discuss the cloud architecture trade-offs?",
+    });
+    await queue.enqueueCueJob({
+      jobId: "cuejob_001",
+      conversationId: conversation.conversationId,
+      triggerWindowId: `${conversation.conversationId}:000001:000001:7`,
+      sourceChunkStart: "000001",
+      sourceChunkEnd: "000001",
+      reasons: ["QUESTION"],
+      wordCount: 7,
+      enqueuedAt: "2026-06-16T10:00:03.000Z",
+      promptContext: "Prepared context: Course Rubric\nExplain serverless trade-offs.",
+    });
+
+    const result = await worker.processNext();
+
+    expect(result.status).toBe("COMPLETED");
+    expect(receivedContext?.promptContext).toBe("Prepared context: Course Rubric\nExplain serverless trade-offs.");
   });
 });

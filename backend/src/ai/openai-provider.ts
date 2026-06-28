@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import { CUE_TYPES, type CueType, type TranscriptChunk } from "@cueflow/shared";
-import type { AiProvider, CueContextWindow, CueProviderResult, SummaryProviderResult } from "./types.js";
+import type { AiProvider, CueContextWindow, CueProviderResult, SummaryProviderOptions, SummaryProviderResult } from "./types.js";
 
 export const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
 
@@ -50,6 +50,20 @@ function combinedTranscript(chunks: TranscriptChunk[]): string {
     .map((chunk) => `${chunk.speaker}: ${chunk.text}`)
     .join("\n")
     .trim();
+}
+
+function promptWithContext(transcript: string, promptContext?: string): string {
+  const context = promptContext?.trim();
+  if (!context) return transcript || "No transcript content.";
+  const contextBlock = /^prepared context:/i.test(context)
+    ? context
+    : `Prepared context:\n${context}`;
+  return [
+    contextBlock,
+    "",
+    "Transcript:",
+    transcript || "No transcript content.",
+  ].join("\n");
 }
 
 function sourceStart(chunks: TranscriptChunk[]): string {
@@ -138,12 +152,13 @@ export class OpenAiProvider implements AiProvider {
             "You generate concise CueFlow conversation intelligence cards.",
             "Return exactly one cue for the transcript window.",
             "Use CONCEPT, DECISION, RISK, ACTION, or SUMMARY.",
+            "Use prepared context when it is supplied, but do not invent facts outside the transcript.",
             "Prefer practical cloud architecture insight over generic advice.",
           ].join(" "),
         },
         {
           role: "user",
-          content: transcript || "No transcript content.",
+          content: promptWithContext(transcript, contextWindow.promptContext),
         },
       ],
       max_output_tokens: 450,
@@ -162,7 +177,7 @@ export class OpenAiProvider implements AiProvider {
     return normalizeCue(parseJson<CueJson>(response.output_text, "Cue"), contextWindow.chunks);
   }
 
-  async generateSummary(fullTranscript: TranscriptChunk[]): Promise<SummaryProviderResult> {
+  async generateSummary(fullTranscript: TranscriptChunk[], options: SummaryProviderOptions = {}): Promise<SummaryProviderResult> {
     const transcript = combinedTranscript(fullTranscript);
     const response = await this.client.responses.create({
       model: this.model,
@@ -172,12 +187,13 @@ export class OpenAiProvider implements AiProvider {
           content: [
             "You create CueFlow conversation summaries.",
             "Summarize the transcript into summary, keyTopics, actionItems, and risks.",
+            "Use prepared context when it is supplied to interpret domain terms and expected topics.",
             "Keep items concrete and useful for a cloud architecture course demo.",
           ].join(" "),
         },
         {
           role: "user",
-          content: transcript || "No transcript content.",
+          content: promptWithContext(transcript, options.promptContext),
         },
       ],
       max_output_tokens: 900,
