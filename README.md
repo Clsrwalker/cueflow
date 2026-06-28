@@ -45,7 +45,7 @@ Open `http://localhost:5174`.
 
 ## Demo Steps
 
-1. Sign in from the CueFlow login page.
+1. Create an account or sign in from the CueFlow login page.
 2. Open the user sidebar from the Sessions header to review or edit profile details.
 3. Review My Records and select any Prepared Notes that should be used as prompt context.
 4. Use the Prepared Notes manager to add, edit, or delete prenotes.

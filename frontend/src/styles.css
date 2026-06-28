@@ -121,12 +121,13 @@ pre {
   align-items: center;
   justify-content: center;
   padding-bottom: 34px;
+  overflow-y: auto;
 }
 
 .login-panel {
   width: 100%;
   display: grid;
-  gap: 28px;
+  gap: 22px;
 }
 
 .login-brand {
@@ -162,6 +163,32 @@ pre {
 .login-form {
   display: grid;
   gap: 16px;
+}
+
+.auth-mode-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  min-height: 48px;
+  border-radius: 8px;
+  background: #dededd;
+  padding: 5px;
+}
+
+.auth-mode-tabs button {
+  border-radius: 6px;
+  color: #626262;
+  font-size: 15px;
+  transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.auth-mode-tabs button.active {
+  background: #fff;
+  color: #202020;
+}
+
+.auth-mode-tabs button:active {
+  transform: scale(0.98);
 }
 
 .login-form label,

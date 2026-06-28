@@ -15,6 +15,7 @@ import {
   Settings2,
   ShieldCheck,
   Trash2,
+  UserPlus,
   UserRound,
   X,
 } from "lucide-react";
@@ -102,8 +103,10 @@ type AuthUser = {
 };
 
 type LoginForm = {
+  name: string;
   email: string;
   password: string;
+  confirmPassword: string;
 };
 
 type SpeechRecognitionResultLike = {
@@ -478,7 +481,13 @@ function buildSummary(record: Pick<ConversationRecord, "title" | "transcript" | 
 
 export default function App() {
   const [authUser, setAuthUser] = useState<AuthUser | null>(() => storedUser());
-  const [loginForm, setLoginForm] = useState<LoginForm>({ email: "student@cueflow.dev", password: "" });
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [loginForm, setLoginForm] = useState<LoginForm>({
+    name: "",
+    email: "student@cueflow.dev",
+    password: "",
+    confirmPassword: "",
+  });
   const [loginError, setLoginError] = useState("");
   const [isAccountOpen, setIsAccountOpen] = useState(false);
   const [accountDraft, setAccountDraft] = useState({ name: "", email: "" });
@@ -718,20 +727,29 @@ export default function App() {
     setPrenotes((current) => current.filter((note) => note.id !== id));
   }
 
-  function submitLogin(event: React.FormEvent<HTMLFormElement>) {
+  function submitAuth(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const email = loginForm.email.trim().toLowerCase();
     const password = loginForm.password.trim();
+    const name = loginForm.name.trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       setLoginError("Enter a valid email address.");
+      return;
+    }
+    if (authMode === "signup" && name.length < 2) {
+      setLoginError("Enter your name.");
       return;
     }
     if (password.length < 6) {
       setLoginError("Password must be at least 6 characters.");
       return;
     }
+    if (authMode === "signup" && password !== loginForm.confirmPassword.trim()) {
+      setLoginError("Passwords do not match.");
+      return;
+    }
     const nextUser: AuthUser = {
-      name: displayNameFromEmail(email),
+      name: authMode === "signup" ? name : displayNameFromEmail(email),
       email,
       role: "Student",
       signedInAt: new Date().toISOString(),
@@ -740,7 +758,8 @@ export default function App() {
     persistUser(nextUser);
     setAccountDraft({ name: nextUser.name, email: nextUser.email });
     setLoginError("");
-    setLoginForm({ email, password: "" });
+    setLoginForm({ name: "", email, password: "", confirmPassword: "" });
+    setAuthMode("signin");
     setScreen("home");
   }
 
@@ -769,7 +788,8 @@ export default function App() {
     persistUser(null);
     setIsAccountOpen(false);
     setScreen("home");
-    setLoginForm({ email: authUser?.email ?? "student@cueflow.dev", password: "" });
+    setLoginForm({ name: "", email: authUser?.email ?? "student@cueflow.dev", password: "", confirmPassword: "" });
+    setAuthMode("signin");
   }
 
   function startConversation() {
@@ -903,7 +923,45 @@ export default function App() {
               <p>Conversation intelligence workspace</p>
             </div>
           </div>
-          <form className="login-form" onSubmit={submitLogin}>
+          <div className="auth-mode-tabs" role="tablist" aria-label="Authentication mode">
+            <button
+              type="button"
+              className={authMode === "signin" ? "active" : ""}
+              onClick={() => {
+                setAuthMode("signin");
+                setLoginError("");
+              }}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              className={authMode === "signup" ? "active" : ""}
+              onClick={() => {
+                setAuthMode("signup");
+                setLoginError("");
+              }}
+            >
+              Create Account
+            </button>
+          </div>
+          <form className="login-form" onSubmit={submitAuth}>
+            {authMode === "signup" && (
+              <label>
+                <span>Name</span>
+                <div className="login-input">
+                  <UserRound size={20} strokeWidth={1.7} />
+                  <input
+                    autoComplete="name"
+                    value={loginForm.name}
+                    onChange={(event) => {
+                      setLoginForm({ ...loginForm, name: event.target.value });
+                      setLoginError("");
+                    }}
+                  />
+                </div>
+              </label>
+            )}
             <label>
               <span>Email</span>
               <div className="login-input">
@@ -934,10 +992,27 @@ export default function App() {
                 />
               </div>
             </label>
+            {authMode === "signup" && (
+              <label>
+                <span>Confirm Password</span>
+                <div className="login-input">
+                  <LockKeyhole size={20} strokeWidth={1.7} />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={loginForm.confirmPassword}
+                    onChange={(event) => {
+                      setLoginForm({ ...loginForm, confirmPassword: event.target.value });
+                      setLoginError("");
+                    }}
+                  />
+                </div>
+              </label>
+            )}
             {loginError && <p className="login-error">{loginError}</p>}
             <button className="login-button" type="submit">
-              <LogIn size={23} strokeWidth={1.7} />
-              Sign In
+              {authMode === "signin" ? <LogIn size={23} strokeWidth={1.7} /> : <UserPlus size={23} strokeWidth={1.7} />}
+              {authMode === "signin" ? "Sign In" : "Create Account"}
             </button>
           </form>
         </section>
