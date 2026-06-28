@@ -18,6 +18,10 @@ const stage = app.node.tryGetContext("stage") ?? "dev";
 const bootstrapless = app.node.tryGetContext("bootstrapless") === "true";
 const labRoleArn = app.node.tryGetContext("labRoleArn") as string | undefined;
 const skipFrontend = app.node.tryGetContext("skipFrontend") === "true";
+const frontendMode = (app.node.tryGetContext("frontendMode") ?? "cloudfront") as "cloudfront" | "s3-website";
+if (!["cloudfront", "s3-website"].includes(frontendMode)) {
+  throw new Error(`Unsupported frontendMode: ${frontendMode}`);
+}
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
   region: process.env.CDK_DEFAULT_REGION ?? "us-east-1",
@@ -26,6 +30,12 @@ const env = {
 type CueFlowStackProps = cdk.StackProps & {
   stage: string;
   autoDeleteObjects?: boolean;
+};
+
+type FrontendMode = "cloudfront" | "s3-website";
+
+type FrontendHostingStackProps = CueFlowStackProps & {
+  mode: FrontendMode;
 };
 
 class StorageStack extends cdk.Stack {
@@ -131,35 +141,52 @@ class QueueStack extends cdk.Stack {
 
 class FrontendHostingStack extends cdk.Stack {
   readonly frontendBucket: s3.Bucket;
-  readonly distribution: cloudfront.Distribution;
+  readonly distribution?: cloudfront.Distribution;
 
-  constructor(scope: Construct, id: string, props: CueFlowStackProps) {
+  constructor(scope: Construct, id: string, props: FrontendHostingStackProps) {
     super(scope, id, props);
 
+    const useS3Website = props.mode === "s3-website";
     this.frontendBucket = new s3.Bucket(this, "FrontendBucket", {
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      blockPublicAccess: useS3Website
+        ? new s3.BlockPublicAccess({
+            blockPublicAcls: false,
+            ignorePublicAcls: false,
+            blockPublicPolicy: false,
+            restrictPublicBuckets: false,
+          })
+        : s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
-      enforceSSL: true,
+      enforceSSL: !useS3Website,
+      publicReadAccess: useS3Website,
+      websiteIndexDocument: useS3Website ? "index.html" : undefined,
+      websiteErrorDocument: useS3Website ? "index.html" : undefined,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: props.autoDeleteObjects ?? true,
     });
 
-    this.distribution = new cloudfront.Distribution(this, "FrontendDistribution", {
-      defaultRootObject: "index.html",
-      defaultBehavior: {
-        origin: origins.S3BucketOrigin.withOriginAccessControl(this.frontendBucket),
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
-        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-      },
-      errorResponses: [
-        { httpStatus: 403, responseHttpStatus: 200, responsePagePath: "/index.html" },
-        { httpStatus: 404, responseHttpStatus: 200, responsePagePath: "/index.html" },
-      ],
-    });
+    if (!useS3Website) {
+      this.distribution = new cloudfront.Distribution(this, "FrontendDistribution", {
+        defaultRootObject: "index.html",
+        defaultBehavior: {
+          origin: origins.S3BucketOrigin.withOriginAccessControl(this.frontendBucket),
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+          cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        },
+        errorResponses: [
+          { httpStatus: 403, responseHttpStatus: 200, responsePagePath: "/index.html" },
+          { httpStatus: 404, responseHttpStatus: 200, responsePagePath: "/index.html" },
+        ],
+      });
+    }
 
     new cdk.CfnOutput(this, "FrontendBucketName", { value: this.frontendBucket.bucketName });
-    new cdk.CfnOutput(this, "FrontendDistributionDomain", { value: this.distribution.distributionDomainName });
+    if (useS3Website) {
+      new cdk.CfnOutput(this, "FrontendWebsiteUrl", { value: this.frontendBucket.bucketWebsiteUrl });
+    } else if (this.distribution) {
+      new cdk.CfnOutput(this, "FrontendDistributionDomain", { value: this.distribution.distributionDomainName });
+    }
   }
 }
 
@@ -396,7 +423,10 @@ const stackProps: CueFlowStackProps = {
 const storage = new StorageStack(app, `CueFlowStorage-${stage}`, stackProps);
 const queues = new QueueStack(app, `CueFlowQueues-${stage}`, stackProps);
 if (!skipFrontend) {
-  new FrontendHostingStack(app, `CueFlowFrontend-${stage}`, stackProps);
+  new FrontendHostingStack(app, `CueFlowFrontend-${stage}`, {
+    ...stackProps,
+    mode: frontendMode,
+  });
 }
 const api = new ApiStack(app, `CueFlowApi-${stage}`, {
   ...stackProps,

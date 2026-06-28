@@ -7,7 +7,7 @@ Stacks:
 - `CueFlowStorage-{stage}`: DynamoDB single-table metadata and encrypted S3 data bucket.
 - `CueFlowQueues-{stage}`: SQS cue and summary queues with DLQs.
 - `CueFlowApi-{stage}`: HTTP API, WebSocket API, and Lambda function definitions.
-- `CueFlowFrontend-{stage}`: S3 frontend bucket and CloudFront distribution.
+- `CueFlowFrontend-{stage}`: S3 frontend bucket with CloudFront distribution by default, or S3 static website fallback for restricted lab accounts.
 - `CueFlowMonitoring-{stage}`: CloudWatch dashboard and alarms.
 
 Commands:
@@ -29,4 +29,10 @@ Some lab policies also block CloudFront creation. In that case, keep the CloudFr
 
 ```bash
 cdk deploy --all --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context skipFrontend=true --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
+```
+
+If you need a browser-openable frontend in Learner Lab, deploy the S3 static website fallback:
+
+```bash
+cdk deploy CueFlowFrontend-dev --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context frontendMode=s3-website --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
 ```

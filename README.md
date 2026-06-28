@@ -6,7 +6,7 @@ A user starts a live conversation, sends transcript chunks, receives lightweight
 
 ## Architecture Summary
 
-- Presentation tier: React + Vite mobile-first web client, hosted on S3 and CloudFront in AWS.
+- Presentation tier: React + Vite mobile-first web client, hosted on S3 and CloudFront in AWS by default, with an S3 static website fallback for restricted Learner Lab accounts.
 - API and edge tier: API Gateway HTTP API for REST and API Gateway WebSocket API for real-time traffic.
 - Application tier: Lambda REST/WebSocket handlers, SQS-backed cue and summary workers, and AI provider abstraction.
 - Data tier: DynamoDB single-table metadata plus S3 transcript and summary objects.
@@ -121,8 +121,16 @@ npm run build
 cdk deploy --all --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context skipFrontend=true --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
 ```
 
+For a browser-openable Learner Lab frontend without CloudFront, deploy the fallback S3 static website mode:
+
+```bash
+cd infra
+npm run build
+cdk deploy CueFlowFrontend-dev --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context frontendMode=s3-website --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
+```
+
 The CDK app defines:
-- S3 frontend bucket and CloudFront distribution.
+- S3 frontend bucket and CloudFront distribution, with an S3 static website fallback for restricted lab accounts.
 - S3 data bucket.
 - API Gateway HTTP API.
 - API Gateway WebSocket API.

@@ -48,7 +48,7 @@ ul {
   width: min(100%, 520px);
   min-height: 100vh;
   margin: 0 auto;
-  padding: max(14px, env(safe-area-inset-top)) 14px 92px;
+  padding: max(14px, env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.46), rgba(255, 255, 255, 0) 210px),
     #e9ece8;
@@ -508,13 +508,10 @@ h1 {
 }
 
 .bottom-bar {
-  position: fixed;
-  right: max(14px, calc((100vw - 520px) / 2 + 14px));
-  bottom: max(12px, env(safe-area-inset-bottom));
-  left: max(14px, calc((100vw - 520px) / 2 + 14px));
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 7px;
+  margin-top: 16px;
   padding: 8px;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
@@ -545,10 +542,6 @@ h1 {
     grid-column: 1 / -1;
   }
 
-  .bottom-bar {
-    right: max(14px, calc((100vw - 960px) / 2 + 14px));
-    left: max(14px, calc((100vw - 960px) / 2 + 14px));
-  }
 }
 
 @media (max-width: 420px) {
