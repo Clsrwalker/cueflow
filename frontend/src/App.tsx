@@ -5,14 +5,21 @@ import {
   Check,
   ChevronRight,
   Lightbulb,
+  LockKeyhole,
+  LogIn,
+  LogOut,
+  Mail,
   MoreHorizontal,
   Pause,
+  Plus,
   Settings2,
+  ShieldCheck,
+  Trash2,
   UserRound,
   X,
 } from "lucide-react";
 
-type Screen = "home" | "settings" | "live" | "history" | "conversationSettings";
+type Screen = "home" | "settings" | "prenoteManager" | "live" | "history" | "conversationSettings";
 type ConversationTab = "summary" | "transcript" | "prenote";
 type CueCategory = "response" | "concept" | "suggestion" | "person";
 type SummaryStatus = "not_started" | "queued" | "running" | "ready" | "failed";
@@ -32,6 +39,11 @@ type Prenote = {
   title: string;
   text: string;
   selected: boolean;
+};
+
+type PrenoteDraft = {
+  title: string;
+  text: string;
 };
 
 type TranscriptLine = {
@@ -82,6 +94,18 @@ type ConversationSettings = {
   cueDuration: 5000 | 10000 | 15000 | "forever";
 };
 
+type AuthUser = {
+  name: string;
+  email: string;
+  role: string;
+  signedInAt: string;
+};
+
+type LoginForm = {
+  email: string;
+  password: string;
+};
+
 type SpeechRecognitionResultLike = {
   isFinal: boolean;
   0?: {
@@ -118,6 +142,7 @@ type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
 const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["concept", "response", "suggestion", "person"];
+const AUTH_STORAGE_KEY = "cueflow.authUser";
 
 const DEFAULT_SETTINGS: ConversationSettings = {
   language: "english",
@@ -195,6 +220,48 @@ const SAMPLE_RECORDS: ConversationRecord[] = [
     usedPrenote: SAMPLE_PRENOTES[0],
   },
 ];
+
+function storedUser(): AuthUser | null {
+  try {
+    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<AuthUser>;
+    if (!parsed.email || !parsed.name) return null;
+    return {
+      name: parsed.name,
+      email: parsed.email,
+      role: parsed.role || "Student",
+      signedInAt: parsed.signedInAt || new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistUser(user: AuthUser | null) {
+  try {
+    if (user) window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
+    else window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch {
+    // The demo still works if local storage is unavailable.
+  }
+}
+
+function displayNameFromEmail(email: string): string {
+  const local = email.split("@")[0] || "CueFlow User";
+  return local
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ") || "CueFlow User";
+}
+
+function userInitials(user: Pick<AuthUser, "name" | "email">): string {
+  const source = user.name.trim() || user.email;
+  const parts = source.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  return source.slice(0, 2).toUpperCase();
+}
 
 function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
   const browserWindow = window as Window & {
@@ -410,10 +477,16 @@ function buildSummary(record: Pick<ConversationRecord, "title" | "transcript" | 
 }
 
 export default function App() {
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => storedUser());
+  const [loginForm, setLoginForm] = useState<LoginForm>({ email: "student@cueflow.dev", password: "" });
+  const [loginError, setLoginError] = useState("");
+  const [isAccountOpen, setIsAccountOpen] = useState(false);
+  const [accountDraft, setAccountDraft] = useState({ name: "", email: "" });
   const [screen, setScreen] = useState<Screen>("home");
   const [settings, setSettings] = useState<ConversationSettings>(DEFAULT_SETTINGS);
   const [records, setRecords] = useState<ConversationRecord[]>(SAMPLE_RECORDS);
   const [prenotes, setPrenotes] = useState<Prenote[]>(SAMPLE_PRENOTES);
+  const [prenoteDraft, setPrenoteDraft] = useState<PrenoteDraft>({ title: "", text: "" });
   const [cues, setCues] = useState<AiCue[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [liveTab, setLiveTab] = useState<ConversationTab>("transcript");
@@ -430,6 +503,10 @@ export default function App() {
 
   const activePrenote = useMemo(() => selectedPrenote(prenotes), [prenotes]);
   const activeRecord = records.find((record) => record.id === activeRecordId) || records[0] || null;
+  const totalRecordMinutes = records.reduce((total, record) => {
+    const [minutes = "0", seconds = "0"] = record.duration.split(":");
+    return total + Number(minutes) + Number(seconds) / 60;
+  }, 0);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const shouldListenRef = useRef(false);
@@ -457,6 +534,14 @@ export default function App() {
     const interval = window.setInterval(() => setElapsedSeconds((current) => current + 1), 1000);
     return () => window.clearInterval(interval);
   }, [isListening]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    setAccountDraft({
+      name: authUser.name,
+      email: authUser.email,
+    });
+  }, [authUser]);
 
   useEffect(() => () => {
     shouldListenRef.current = false;
@@ -601,6 +686,92 @@ export default function App() {
     setPrenotes((current) => current.map((note) => note.id === id ? { ...note, selected: !note.selected } : note));
   }
 
+  function addPrenote(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = prenoteDraft.text.trim();
+    const explicitTitle = prenoteDraft.title.trim();
+    if (!text && !explicitTitle) return;
+    const title = explicitTitle || text.split(/\r?\n/).find(Boolean)?.slice(0, 48) || "Prepared Note";
+    const note: Prenote = {
+      id: `pn-${Date.now().toString(36)}`,
+      title,
+      text: text || title,
+      selected: true,
+    };
+    setPrenotes((current) => [note, ...current]);
+    setPrenoteDraft({ title: "", text: "" });
+  }
+
+  function updatePrenote(id: string, patch: Partial<Pick<Prenote, "title" | "text">>) {
+    setPrenotes((current) => current.map((note) => (
+      note.id === id
+        ? {
+            ...note,
+            title: patch.title !== undefined ? patch.title : note.title,
+            text: patch.text !== undefined ? patch.text : note.text,
+          }
+        : note
+    )));
+  }
+
+  function deletePrenote(id: string) {
+    setPrenotes((current) => current.filter((note) => note.id !== id));
+  }
+
+  function submitLogin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = loginForm.email.trim().toLowerCase();
+    const password = loginForm.password.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setLoginError("Enter a valid email address.");
+      return;
+    }
+    if (password.length < 6) {
+      setLoginError("Password must be at least 6 characters.");
+      return;
+    }
+    const nextUser: AuthUser = {
+      name: displayNameFromEmail(email),
+      email,
+      role: "Student",
+      signedInAt: new Date().toISOString(),
+    };
+    setAuthUser(nextUser);
+    persistUser(nextUser);
+    setAccountDraft({ name: nextUser.name, email: nextUser.email });
+    setLoginError("");
+    setLoginForm({ email, password: "" });
+    setScreen("home");
+  }
+
+  function saveAccount() {
+    if (!authUser) return;
+    const email = accountDraft.email.trim().toLowerCase();
+    const name = accountDraft.name.trim();
+    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
+    const nextUser = {
+      ...authUser,
+      name,
+      email,
+    };
+    setAuthUser(nextUser);
+    persistUser(nextUser);
+  }
+
+  function signOut() {
+    if (activeConversationIdRef.current) {
+      stopRecognition("signed out");
+    }
+    setIsListening(false);
+    setActiveConversationId(null);
+    activeConversationIdRef.current = null;
+    setAuthUser(null);
+    persistUser(null);
+    setIsAccountOpen(false);
+    setScreen("home");
+    setLoginForm({ email: authUser?.email ?? "student@cueflow.dev", password: "" });
+  }
+
   function startConversation() {
     const startedAt = new Date();
     const id = `conv-${Date.now().toString(36)}`;
@@ -716,6 +887,124 @@ export default function App() {
         <h1>{title}</h1>
         <div className="topbar-right">{right}</div>
       </header>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <main className="phone-shell login-page">
+        <section className="login-panel">
+          <div className="login-brand">
+            <span className="login-mark">
+              <ShieldCheck size={30} strokeWidth={1.55} />
+            </span>
+            <div>
+              <h1>CueFlow</h1>
+              <p>Conversation intelligence workspace</p>
+            </div>
+          </div>
+          <form className="login-form" onSubmit={submitLogin}>
+            <label>
+              <span>Email</span>
+              <div className="login-input">
+                <Mail size={20} strokeWidth={1.7} />
+                <input
+                  type="email"
+                  autoComplete="email"
+                  value={loginForm.email}
+                  onChange={(event) => {
+                    setLoginForm({ ...loginForm, email: event.target.value });
+                    setLoginError("");
+                  }}
+                />
+              </div>
+            </label>
+            <label>
+              <span>Password</span>
+              <div className="login-input">
+                <LockKeyhole size={20} strokeWidth={1.7} />
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={loginForm.password}
+                  onChange={(event) => {
+                    setLoginForm({ ...loginForm, password: event.target.value });
+                    setLoginError("");
+                  }}
+                />
+              </div>
+            </label>
+            {loginError && <p className="login-error">{loginError}</p>}
+            <button className="login-button" type="submit">
+              <LogIn size={23} strokeWidth={1.7} />
+              Sign In
+            </button>
+          </form>
+        </section>
+      </main>
+    );
+  }
+
+  if (screen === "prenoteManager") {
+    return (
+      <main className="phone-shell settings-page prenote-manager-page">
+        {renderHeader("Prepared Notes", <span />, "home")}
+        <section className="settings-section">
+          <h2>Add Prepared Note</h2>
+          <form className="prenote-create-form" onSubmit={addPrenote}>
+            <input
+              value={prenoteDraft.title}
+              placeholder="Title"
+              onChange={(event) => setPrenoteDraft({ ...prenoteDraft, title: event.target.value })}
+            />
+            <textarea
+              value={prenoteDraft.text}
+              placeholder="Context"
+              onChange={(event) => setPrenoteDraft({ ...prenoteDraft, text: event.target.value })}
+            />
+            <button type="submit" disabled={!prenoteDraft.title.trim() && !prenoteDraft.text.trim()}>
+              <Plus size={21} strokeWidth={1.8} />
+              Add Note
+            </button>
+          </form>
+        </section>
+        <section className="settings-section">
+          <div className="section-row compact">
+            <h2>Manage Notes</h2>
+            <span>{prenotes.length}</span>
+          </div>
+          <div className="manage-note-list">
+            {prenotes.length ? prenotes.map((note) => (
+              <article className="manage-note-card" key={note.id}>
+                <label className="switch-row note-select-row">
+                  <span>Use in session</span>
+                  <input type="checkbox" checked={note.selected} onChange={() => togglePrenote(note.id)} />
+                </label>
+                <input
+                  value={note.title}
+                  aria-label={`${note.title || "Prepared note"} title`}
+                  onChange={(event) => updatePrenote(note.id, { title: event.target.value })}
+                  onBlur={() => {
+                    if (!note.title.trim()) updatePrenote(note.id, { title: "Prepared Note" });
+                  }}
+                />
+                <textarea
+                  value={note.text}
+                  aria-label={`${note.title || "Prepared note"} context`}
+                  onChange={(event) => updatePrenote(note.id, { text: event.target.value })}
+                  onBlur={() => {
+                    if (!note.text.trim()) updatePrenote(note.id, { text: note.title || "Prepared Note" });
+                  }}
+                />
+                <button className="delete-note-button" type="button" onClick={() => deletePrenote(note.id)}>
+                  <Trash2 size={20} strokeWidth={1.8} />
+                  Delete
+                </button>
+              </article>
+            )) : <p className="empty-note-state">-</p>}
+          </div>
+        </section>
+      </main>
     );
   }
 
@@ -846,14 +1135,81 @@ export default function App() {
   return (
     <main className="phone-shell home-page">
       <header className="home-header">
-        <button className="corner-mark" aria-label="Main">
-          <span />
+        <button className="user-menu-button" aria-label="User account" onClick={() => setIsAccountOpen(true)}>
+          <span>{userInitials(authUser)}</span>
         </button>
         <h1>Sessions</h1>
         <button className="icon-button" aria-label="Settings" onClick={() => setScreen("settings")}>
           <Settings2 size={33} strokeWidth={1.55} />
         </button>
       </header>
+      {isAccountOpen && (
+        <aside className="account-overlay" role="presentation" onClick={() => setIsAccountOpen(false)}>
+          <section className="account-sidebar" role="dialog" aria-modal="true" aria-label="User account" onClick={(event) => event.stopPropagation()}>
+            <header>
+              <div className="account-avatar">{userInitials(authUser)}</div>
+              <button className="icon-button" type="button" aria-label="Close account" onClick={() => setIsAccountOpen(false)}>
+                <X size={26} strokeWidth={1.6} />
+              </button>
+            </header>
+            <div className="account-profile">
+              <h2>{authUser.name}</h2>
+              <p>{authUser.email}</p>
+              <span>{authUser.role}</span>
+            </div>
+            <div className="account-stats">
+              <div>
+                <strong>{records.length}</strong>
+                <span>Sessions</span>
+              </div>
+              <div>
+                <strong>{Math.round(totalRecordMinutes)}</strong>
+                <span>Minutes</span>
+              </div>
+              <div>
+                <strong>{prenotes.filter((note) => note.selected).length}</strong>
+                <span>Notes</span>
+              </div>
+            </div>
+            <form className="account-form" onSubmit={(event) => {
+              event.preventDefault();
+              saveAccount();
+            }}>
+              <label>
+                <span>Name</span>
+                <input
+                  value={accountDraft.name}
+                  onChange={(event) => setAccountDraft({ ...accountDraft, name: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>Email</span>
+                <input
+                  type="email"
+                  value={accountDraft.email}
+                  onChange={(event) => setAccountDraft({ ...accountDraft, email: event.target.value })}
+                />
+              </label>
+              <button className="account-save-button" type="submit">
+                <Check size={20} strokeWidth={1.8} />
+                Save Profile
+              </button>
+            </form>
+            <button className="account-row" type="button" onClick={() => {
+              setIsAccountOpen(false);
+              setScreen("settings");
+            }}>
+              <Settings2 size={21} strokeWidth={1.7} />
+              App Settings
+              <ChevronRight size={22} strokeWidth={1.5} />
+            </button>
+            <button className="account-signout" type="button" onClick={signOut}>
+              <LogOut size={21} strokeWidth={1.7} />
+              Sign Out
+            </button>
+          </section>
+        </aside>
+      )}
 
       <section className="record-section">
         <div className="section-row">
@@ -887,7 +1243,12 @@ export default function App() {
       </section>
 
       <section className="prenote-dock">
-        <h2>Prepared Notes</h2>
+        <div className="prenote-title-row">
+          <h2>Prepared Notes</h2>
+          <button className="small-icon-button" type="button" aria-label="Manage prepared notes" onClick={() => setScreen("prenoteManager")}>
+            <Plus size={22} strokeWidth={1.8} />
+          </button>
+        </div>
         <div className="prenote-row">
           {prenotes.map((note) => (
             <button className="prenote-card" key={note.id} onClick={() => togglePrenote(note.id)}>

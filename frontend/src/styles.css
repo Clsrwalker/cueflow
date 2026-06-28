@@ -94,48 +94,265 @@ pre {
   transform: scale(0.94);
 }
 
-.corner-mark {
-  position: relative;
-  width: 56px;
-  height: 56px;
+.user-menu-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #202020;
+  color: #fff;
+  transition: transform 140ms ease, background 140ms ease;
 }
 
-.corner-mark::before,
-.corner-mark::after,
-.corner-mark span::before,
-.corner-mark span::after {
-  content: "";
-  position: absolute;
-  background: #242424;
+.user-menu-button:active {
+  transform: scale(0.94);
 }
 
-.corner-mark::before {
-  left: 12px;
-  top: 28px;
-  width: 30px;
-  height: 2px;
-  transform: rotate(-45deg);
+.user-menu-button span {
+  font-size: 15px;
+  font-weight: 520;
+  letter-spacing: 0;
 }
 
-.corner-mark::after {
-  left: 28px;
-  top: 12px;
-  width: 2px;
-  height: 30px;
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 34px;
 }
 
-.corner-mark span::before {
-  left: 12px;
-  top: 12px;
-  width: 2px;
-  height: 18px;
+.login-panel {
+  width: 100%;
+  display: grid;
+  gap: 28px;
 }
 
-.corner-mark span::after {
-  left: 12px;
-  top: 12px;
-  width: 18px;
-  height: 2px;
+.login-brand {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.login-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 16px;
+  background: #202020;
+  color: #fff;
+}
+
+.login-brand h1 {
+  font-size: 34px;
+  font-weight: 520;
+  line-height: 1.05;
+}
+
+.login-brand p {
+  margin-top: 8px;
+  color: #696969;
+  font-size: 15px;
+}
+
+.login-form {
+  display: grid;
+  gap: 16px;
+}
+
+.login-form label,
+.account-form label {
+  display: grid;
+  gap: 8px;
+  color: #555;
+  font-size: 14px;
+}
+
+.login-input {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0 16px;
+  color: #676767;
+}
+
+.login-input input,
+.account-form input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: #202020;
+  outline: none;
+}
+
+.login-error {
+  color: #b43d37;
+  font-size: 14px;
+}
+
+.login-button,
+.account-save-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 60px;
+  border-radius: 8px;
+  background: #202020;
+  color: #fff;
+  font-size: 18px;
+  transition: transform 150ms ease;
+}
+
+.login-button:active,
+.account-save-button:active {
+  transform: scale(1.01);
+}
+
+.account-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.account-sidebar {
+  width: min(86vw, 356px);
+  min-height: 100vh;
+  padding: max(16px, env(safe-area-inset-top)) 16px 24px;
+  background: #f4f4f3;
+  box-shadow: 18px 0 42px rgba(0, 0, 0, 0.18);
+  animation: drawer-enter 180ms ease-out both;
+}
+
+.account-sidebar header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.account-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: #202020;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 520;
+}
+
+.account-profile {
+  margin-top: 22px;
+}
+
+.account-profile h2 {
+  font-size: 24px;
+  font-weight: 520;
+  line-height: 1.15;
+}
+
+.account-profile p {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  color: #666;
+  font-size: 14px;
+}
+
+.account-profile span {
+  display: inline-flex;
+  margin-top: 14px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #dededd;
+  color: #3d3d3d;
+  font-size: 13px;
+}
+
+.account-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.account-stats div {
+  min-width: 0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px 10px;
+}
+
+.account-stats strong,
+.account-stats span {
+  display: block;
+  text-align: center;
+}
+
+.account-stats strong {
+  color: #202020;
+  font-size: 22px;
+  font-weight: 520;
+}
+
+.account-stats span {
+  margin-top: 5px;
+  color: #767676;
+  font-size: 12px;
+}
+
+.account-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 24px;
+}
+
+.account-form input {
+  min-height: 52px;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0 14px;
+}
+
+.account-save-button {
+  min-height: 54px;
+  font-size: 16px;
+}
+
+.account-row,
+.account-signout {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 24px;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  min-height: 56px;
+  margin-top: 14px;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0 14px;
+  text-align: left;
+  font-size: 16px;
+}
+
+.account-row svg:last-child {
+  justify-self: end;
+}
+
+.account-signout {
+  grid-template-columns: 28px minmax(0, 1fr);
+  color: #b43d37;
 }
 
 .section-row {
@@ -272,8 +489,31 @@ pre {
   background: #eeeeed;
 }
 
-.prenote-dock h2 {
+.prenote-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin: 0 5px 12px;
+}
+
+.prenote-title-row h2 {
+  margin: 0;
+}
+
+.small-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: #202020;
+  color: #fff;
+  transition: transform 140ms ease;
+}
+
+.small-icon-button:active {
+  transform: scale(0.94);
 }
 
 .prenote-row {
@@ -462,6 +702,92 @@ pre {
   color: #888;
   font-size: 13px;
   line-height: 1.4;
+}
+
+.section-row.compact {
+  margin-top: 0;
+}
+
+.prenote-create-form {
+  display: grid;
+  gap: 10px;
+}
+
+.prenote-create-form input,
+.prenote-create-form textarea,
+.manage-note-card input,
+.manage-note-card textarea {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: #fff;
+  color: #202020;
+  outline: none;
+}
+
+.prenote-create-form input,
+.manage-note-card input {
+  min-height: 52px;
+  padding: 0 14px;
+}
+
+.prenote-create-form textarea,
+.manage-note-card textarea {
+  min-height: 126px;
+  resize: vertical;
+  padding: 14px;
+  line-height: 1.35;
+}
+
+.prenote-create-form button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 54px;
+  border-radius: 8px;
+  background: #202020;
+  color: #fff;
+  font-size: 16px;
+}
+
+.manage-note-list {
+  display: grid;
+  gap: 12px;
+}
+
+.manage-note-card {
+  display: grid;
+  gap: 10px;
+  border-radius: 8px;
+  background: #dededd;
+  padding: 12px;
+}
+
+.note-select-row {
+  min-height: 44px;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0 14px;
+}
+
+.delete-note-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 48px;
+  border-radius: 8px;
+  background: #fff;
+  color: #b43d37;
+  font-size: 16px;
+}
+
+.empty-note-state {
+  border-radius: 8px;
+  background: #fff;
+  padding: 18px;
+  color: #777;
 }
 
 .conversation-title-card {
@@ -868,6 +1194,17 @@ pre {
   }
 }
 
+@keyframes drawer-enter {
+  from {
+    transform: translateX(-18px);
+    opacity: 0.72;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
 @media (max-width: 390px) {
   .phone-shell {
     padding-right: 10px;
@@ -897,8 +1234,13 @@ pre {
   }
 
   .settings-page,
-  .modal-page {
+  .modal-page,
+  .login-page {
     width: min(100%, 760px);
+  }
+
+  .login-page {
+    width: min(100%, 520px);
   }
 
   .topbar,
