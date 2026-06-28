@@ -1,30 +1,97 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertCircle,
-  History,
-  ListRestart,
-  MessageSquareText,
-  Mic,
-  MicOff,
-  Play,
-  Radio,
-  RotateCcw,
-  Send,
-  Sparkles,
+  ArrowLeft,
+  BookOpen,
+  Check,
+  ChevronRight,
+  Lightbulb,
+  MoreHorizontal,
+  Pause,
+  Plus,
+  Settings2,
   Square,
   Trash2,
+  Upload,
+  UserRound,
+  X,
 } from "lucide-react";
-import type { Conversation, ConversationSummary, Cue, CueType, TranscriptAckEvent, TranscriptChunk } from "@cueflow/shared";
 
-type View = "live" | "history";
-type ConnectionState = "idle" | "connected" | "replaying" | "summary-pending" | "summary-ready";
-type SpeechState = "idle" | "starting" | "listening" | "unsupported" | "blocked" | "error";
+type Screen = "home" | "settings" | "noteEditor" | "live" | "history" | "conversationSettings";
+type ConversationTab = "summary" | "transcript" | "prenote";
+type CueCategory = "response" | "concept" | "suggestion" | "person";
+type SummaryStatus = "not_started" | "queued" | "running" | "ready" | "failed";
+type SpeechLanguage = "english" | "chinese" | "auto";
 
-type HistoryRecord = {
-  conversation: Conversation;
-  transcript: TranscriptChunk[];
-  cues: Cue[];
-  summary: ConversationSummary | null;
+type AiCue = {
+  id: string;
+  category: CueCategory;
+  title: string;
+  output: string;
+  createdAt: string;
+  source: "manual" | "auto";
+};
+
+type PrenoteFile = {
+  id: string;
+  name: string;
+  sizeBytes: number;
+  status: "ready" | "pending" | "error";
+};
+
+type Prenote = {
+  id: string;
+  title: string;
+  text: string;
+  selected: boolean;
+  files: PrenoteFile[];
+};
+
+type TranscriptLine = {
+  id: string;
+  time: string;
+  text: string;
+  partial?: boolean;
+};
+
+type ConversationSummaryKeyPoint = {
+  id: string;
+  title: string;
+  details: string[];
+};
+
+type ConversationSummaryActionItem = {
+  id: string;
+  text: string;
+  checked: boolean;
+};
+
+type ConversationSummary = {
+  status: SummaryStatus;
+  title: string;
+  overview: string;
+  keyPoints: ConversationSummaryKeyPoint[];
+  actionItems: ConversationSummaryActionItem[];
+  emptyReason?: string;
+  generatedAt?: string;
+  error?: string;
+};
+
+type ConversationRecord = {
+  id: string;
+  title: string;
+  startedAt: string;
+  location: string;
+  duration: string;
+  summary: ConversationSummary;
+  transcript: TranscriptLine[];
+  cueHistory: AiCue[];
+  usedPrenote?: Prenote;
+};
+
+type ConversationSettings = {
+  language: SpeechLanguage;
+  autoCue: boolean;
+  cueDuration: 5000 | 10000 | 15000 | "forever";
 };
 
 type SpeechRecognitionResultLike = {
@@ -61,6 +128,90 @@ type SpeechRecognitionLike = {
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
+const MAX_FILES = 5;
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
+const CUE_CATEGORY_ORDER: CueCategory[] = ["concept", "response", "suggestion", "person"];
+
+const DEFAULT_SETTINGS: ConversationSettings = {
+  language: "english",
+  autoCue: true,
+  cueDuration: 10000,
+};
+
+const SAMPLE_PRENOTES: Prenote[] = [
+  {
+    id: "pn-architecture",
+    title: "Architecture Brief",
+    text: "Discuss CueFlow as a mobile-first cloud-native conversation intelligence platform. Cover WebSocket ingestion, async AI cue generation, DynamoDB metadata, and S3 transcript storage.",
+    selected: true,
+    files: [],
+  },
+  {
+    id: "pn-rubric",
+    title: "Course Rubric",
+    text: "Be ready to explain cloud-native design, serverless trade-offs, monitoring, reliability, and cost controls.",
+    selected: false,
+    files: [],
+  },
+];
+
+const SAMPLE_RECORDS: ConversationRecord[] = [
+  {
+    id: "record-cloud-review",
+    title: "Cloud architecture review",
+    startedAt: "Jun 28, 1:08 PM",
+    location: "CueFlow demo",
+    duration: "08:42",
+    summary: {
+      status: "ready",
+      title: "Cloud architecture review",
+      overview: "The session compared REST and WebSocket flows, separated transcript storage from AI work, and identified latency as the main operational risk.",
+      keyPoints: [
+        {
+          id: "kp-1",
+          title: "Real-time delivery",
+          details: ["Use WebSocket for live transcript and cue updates.", "Keep REST for history and summary retrieval."],
+        },
+        {
+          id: "kp-2",
+          title: "Async processing",
+          details: ["Queue cue generation so transcript ingestion does not wait for AI latency."],
+        },
+      ],
+      actionItems: [
+        { id: "act-1", text: "Deploy the mobile web client behind an HTTPS endpoint.", checked: true },
+        { id: "act-2", text: "Explain why transcript chunks are persisted before AI processing.", checked: false },
+      ],
+      generatedAt: new Date().toISOString(),
+    },
+    transcript: [
+      { id: "tr-1", time: "00:08", text: "We need CueFlow to feel like a real live conversation tool, not a manual demo form." },
+      { id: "tr-2", time: "00:31", text: "The transcript should appear after entering a session and AI cues should come from the live context." },
+      { id: "tr-3", time: "01:14", text: "The main cloud risk is AI latency if every chunk directly calls the model." },
+    ],
+    cueHistory: [
+      {
+        id: "cue-1",
+        category: "concept",
+        title: "Async cue pipeline",
+        output: "Persist transcript chunks first, then enqueue context windows for AI cue generation.",
+        createdAt: new Date().toISOString(),
+        source: "auto",
+      },
+      {
+        id: "cue-2",
+        category: "suggestion",
+        title: "Demo talking point",
+        output: "Show the listener view first, then open transcript and summary tabs from the same session.",
+        createdAt: new Date().toISOString(),
+        source: "auto",
+      },
+    ],
+    usedPrenote: SAMPLE_PRENOTES[0],
+  },
+];
+
 function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
   const browserWindow = window as Window & {
     SpeechRecognition?: SpeechRecognitionConstructor;
@@ -69,336 +220,278 @@ function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null 
   return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition ?? null;
 }
 
-function initialSpeechState(): SpeechState {
-  if (!getSpeechRecognitionConstructor()) return "unsupported";
-  return window.isSecureContext ? "idle" : "blocked";
+function selectedPrenote(prenotes: Prenote[]): Prenote | null {
+  const selected = prenotes.filter((note) => note.selected);
+  if (!selected.length) return null;
+  if (selected.length === 1) return selected[0];
+  return {
+    id: "combined-prenote",
+    title: "Selected Notes",
+    text: selected.map((note) => `# ${note.title}\n${note.text}`).join("\n\n---\n\n"),
+    selected: true,
+    files: selected.flatMap((note) => note.files),
+  };
 }
 
-const DEMO_TRANSCRIPT = [
-  "We need to design the cloud architecture for CueFlow.",
-  "The app should receive transcript chunks from a mobile client.",
-  "Should we use WebSocket or REST polling for real-time AI cues?",
-  "WebSocket seems better for pushing cue cards, but it adds connection state.",
-  "We also need to store raw transcript and generated summaries.",
-  "Maybe DynamoDB can store metadata and S3 can store full transcript objects.",
-  "The main risk is AI latency, especially if every chunk calls the model.",
-  "We should use SQS so transcript ingestion does not wait for the AI worker.",
-  "At the end of the conversation, the system should generate a summary and action items.",
-];
-
-const CUE_STYLE: Record<CueType, string> = {
-  CONCEPT: "concept",
-  DECISION: "decision",
-  RISK: "risk",
-  ACTION: "action",
-  SUMMARY: "summary",
-};
-
-function isoNow(): string {
-  return new Date().toISOString();
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function timeLabel(value: string): string {
+function formatClock(value: Date): string {
   return new Intl.DateTimeFormat(undefined, {
     hour: "2-digit",
     minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(value));
+  }).format(value);
 }
 
-function dateLabel(value: string): string {
+function formatRecordDate(value: Date): string {
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(value));
+  }).format(value);
 }
 
-function durationLabel(startedAt: string, endedAt?: string | null): string {
-  const end = endedAt ? Date.parse(endedAt) : Date.now();
-  const seconds = Math.max(0, Math.round((end - Date.parse(startedAt)) / 1000));
+function elapsedLabel(seconds: number): string {
   const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
   const rest = (seconds % 60).toString().padStart(2, "0");
   return `${minutes}:${rest}`;
 }
 
-function wordCount(text: string): number {
-  return text.match(/[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g)?.length ?? 0;
+function cueIcon(category: CueCategory) {
+  if (category === "concept") return <BookOpen size={22} strokeWidth={1.7} />;
+  if (category === "response") return <span className="question-icon">?</span>;
+  if (category === "suggestion") return <Lightbulb size={22} strokeWidth={1.7} />;
+  return <UserRound size={22} strokeWidth={1.7} />;
 }
 
-function shouldTriggerCue(chunks: TranscriptChunk[], cues: Cue[]): boolean {
-  const lastCue = cues[0];
-  const window = lastCue
-    ? chunks.slice(chunks.findIndex((chunk) => chunk.chunkId === lastCue.sourceChunkEnd) + 1)
-    : chunks;
-  const text = window.map((chunk) => chunk.text).join(" ");
-  const lower = text.toLowerCase();
-  return wordCount(text) > 60
-    || text.includes("?")
-    || [
-      "choose",
-      "compare",
-      "trade-off",
-      "should we",
-      "risk",
-      "latency",
-      "failure",
-      "cost",
-      "security",
-      "reliability",
-      "websocket",
-      "sqs",
-      "dynamodb",
-      "s3",
-    ].some((keyword) => lower.includes(keyword));
+function cueLabel(category: CueCategory): string {
+  if (category === "concept") return "Concept";
+  if (category === "response") return "Response";
+  if (category === "suggestion") return "Suggestion";
+  return "People";
 }
 
-function buildCue(conversationId: string, chunks: TranscriptChunk[]): Cue {
-  const text = chunks.map((chunk) => chunk.text).join(" ");
-  const lower = text.toLowerCase();
-  const createdAt = isoNow();
-  const sourceChunkStart = chunks[0]?.chunkId ?? "000001";
-  const sourceChunkEnd = chunks[chunks.length - 1]?.chunkId ?? sourceChunkStart;
+function shouldAutoFollowTranscriptScroll(params: {
+  scrollHeight: number;
+  scrollTop: number;
+  clientHeight: number;
+  thresholdPx?: number;
+}): boolean {
+  const threshold = params.thresholdPx ?? TRANSCRIPT_FOLLOW_THRESHOLD_PX;
+  return params.scrollHeight - params.scrollTop - params.clientHeight <= threshold;
+}
 
-  if (/\b(risk|failure|latency|cost|security|reliability|uncertain|slow)\b/.test(lower)) {
-    return {
-      cueId: `cue_${createdAt.replace(/\D/g, "")}`,
-      conversationId,
-      type: "RISK",
-      title: "Risk detected",
-      shortText: "The transcript mentions reliability, latency, cost, security, or failure risk.",
-      detailText: "Persist transcript chunks before AI processing and rely on queue retries so data is not lost.",
-      sourceChunkStart,
-      sourceChunkEnd,
-      confidence: 0.86,
-      createdAt,
-      modelLatencyMs: 720,
-    };
-  }
-
-  if (/\b(todo|next|need to|should implement|we should|action items)\b/.test(lower)) {
-    return {
-      cueId: `cue_${createdAt.replace(/\D/g, "")}`,
-      conversationId,
-      type: "ACTION",
-      title: "Action item",
-      shortText: "The conversation implies a concrete implementation step.",
-      detailText: "Capture this item in the session summary so it remains visible after the live session ends.",
-      sourceChunkStart,
-      sourceChunkEnd,
-      confidence: 0.84,
-      createdAt,
-      modelLatencyMs: 680,
-    };
-  }
-
-  if (/\b(summary|recap|end conversation|session end)\b/.test(lower)) {
-    return {
-      cueId: `cue_${createdAt.replace(/\D/g, "")}`,
-      conversationId,
-      type: "SUMMARY",
-      title: "Summary checkpoint",
-      shortText: "The conversation is moving toward a structured recap.",
-      detailText: "CueFlow can summarize key topics, action items, and risks when the session ends.",
-      sourceChunkStart,
-      sourceChunkEnd,
-      confidence: 0.82,
-      createdAt,
-      modelLatencyMs: 690,
-    };
-  }
-
-  if (/\b(websocket|polling|rest|lambda|fargate|choose|compare|trade-off|alternative|should we)\b/.test(lower)) {
-    return {
-      cueId: `cue_${createdAt.replace(/\D/g, "")}`,
-      conversationId,
-      type: "DECISION",
-      title: "Architecture decision",
-      shortText: "The transcript discusses alternatives or a cloud architecture choice.",
-      detailText: "Use WebSocket for real-time cue delivery and REST for non-real-time history and summary retrieval.",
-      sourceChunkStart,
-      sourceChunkEnd,
-      confidence: 0.88,
-      createdAt,
-      modelLatencyMs: 760,
-    };
-  }
-
+function groupCuesByCategory(cues: AiCue[]): Record<CueCategory, AiCue[]> {
   return {
-    cueId: `cue_${createdAt.replace(/\D/g, "")}`,
-    conversationId,
-    type: "CONCEPT",
-    title: "Cloud architecture concept",
-    shortText: "The conversation introduces a cloud-native building block.",
-    detailText: "Keep metadata, transcript objects, and async AI work separated so each tier has a clear responsibility.",
-    sourceChunkStart,
-    sourceChunkEnd,
-    confidence: 0.8,
-    createdAt,
-    modelLatencyMs: 640,
+    concept: cues.filter((cue) => cue.category === "concept"),
+    response: cues.filter((cue) => cue.category === "response"),
+    suggestion: cues.filter((cue) => cue.category === "suggestion"),
+    person: cues.filter((cue) => cue.category === "person"),
   };
 }
 
-function buildSummary(conversationId: string, chunks: TranscriptChunk[]): ConversationSummary {
-  const text = chunks.map((chunk) => chunk.text.trim()).filter(Boolean).join(" ");
-  const sentences = text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
-  const keyTopics = [
-    /\b(websocket|real-time)\b/i.test(text) && "WebSocket real-time delivery",
-    /\b(rest|history|summary retrieval)\b/i.test(text) && "REST API lifecycle",
-    /\b(sqs|queue|async)\b/i.test(text) && "SQS async processing",
-    /\b(dynamodb|metadata)\b/i.test(text) && "DynamoDB metadata storage",
-    /\b(s3|raw transcript|object storage|summary)\b/i.test(text) && "S3 transcript and summary storage",
-    /\b(ai|cue|model)\b/i.test(text) && "AI cue generation",
-    /\b(risk|failure|latency|reliability)\b/i.test(text) && "Cloud reliability and latency",
-  ].filter(Boolean) as string[];
+function words(value: string): number {
+  return value.match(/[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g)?.length ?? 0;
+}
 
-  const actionItems = sentences.filter((sentence) => /\b(todo|next|need to|should implement|we should|should generate)\b/i.test(sentence));
-  const risks = sentences.filter((sentence) => /\b(risk|failure|latency|cost|security|reliability|uncertain|slow)\b/i.test(sentence));
+function buildCue(lines: TranscriptLine[]): AiCue {
+  const text = lines.map((line) => line.text).join(" ");
+  const lower = text.toLowerCase();
+  const id = `cue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  const createdAt = new Date().toISOString();
+
+  if (/\b(risk|failure|latency|cost|security|reliability|slow)\b/.test(lower)) {
+    return {
+      id,
+      category: "suggestion",
+      title: "Risk to address",
+      output: "The conversation is surfacing operational risk. Capture the mitigation before the topic moves on.",
+      createdAt,
+      source: "auto",
+    };
+  }
+
+  if (/\b(should|next|todo|need to|action|follow up)\b/.test(lower)) {
+    return {
+      id,
+      category: "response",
+      title: "Possible next response",
+      output: "Ask for the owner, timeline, and expected outcome so this becomes a concrete action item.",
+      createdAt,
+      source: "auto",
+    };
+  }
+
+  if (/\b(websocket|sqs|dynamodb|s3|lambda|cloud|architecture|api)\b/.test(lower)) {
+    return {
+      id,
+      category: "concept",
+      title: "Architecture concept",
+      output: "Separate live ingestion, durable storage, and AI processing so each cloud component has one clear responsibility.",
+      createdAt,
+      source: "auto",
+    };
+  }
 
   return {
-    conversationId,
-    summary: text
-      ? `The session focused on ${(keyTopics.length ? keyTopics : ["conversation architecture"]).slice(0, 3).join(", ")}.`
-      : "The conversation did not contain enough transcript content for a detailed summary.",
-    keyTopics: keyTopics.length ? keyTopics : ["Conversation architecture"],
-    actionItems: actionItems.length ? actionItems : ["Review generated cues and finalize the next implementation step."],
-    risks: risks.length ? risks : ["No major risks were explicitly identified in the transcript."],
-    createdAt: isoNow(),
+    id,
+    category: "response",
+    title: "Follow-up prompt",
+    output: "Ask a short clarifying question and keep the conversation moving.",
+    createdAt,
+    source: "auto",
+  };
+}
+
+function shouldGenerateCue(lines: TranscriptLine[], cues: AiCue[]): boolean {
+  const lastCue = cues[0];
+  const recent = lastCue ? lines.slice(-3) : lines.slice(-2);
+  const text = recent.map((line) => line.text).join(" ");
+  return words(text) >= 18 || /[?]/.test(text) || /\b(risk|should|decision|latency|cloud|api|next)\b/i.test(text);
+}
+
+function buildSummary(record: Pick<ConversationRecord, "title" | "transcript" | "cueHistory">): ConversationSummary {
+  const text = record.transcript.map((line) => line.text).join(" ");
+  const lower = text.toLowerCase();
+  const keyPoints: ConversationSummaryKeyPoint[] = [];
+  if (/\b(websocket|live|real-time|transcript)\b/.test(lower)) {
+    keyPoints.push({
+      id: "kp-live",
+      title: "Live conversation flow",
+      details: ["Transcript is captured inside the session page.", "AI cue generation follows the live transcript context."],
+    });
+  }
+  if (/\b(sqs|queue|async|latency|worker)\b/.test(lower)) {
+    keyPoints.push({
+      id: "kp-async",
+      title: "Async AI processing",
+      details: ["AI work should not block transcript ingestion.", "Queue retries help keep the system resilient."],
+    });
+  }
+  if (/\b(s3|dynamodb|storage|history|summary)\b/.test(lower)) {
+    keyPoints.push({
+      id: "kp-storage",
+      title: "Durable history",
+      details: ["Keep session metadata queryable and preserve transcript text for review."],
+    });
+  }
+
+  const actionItems = record.transcript
+    .filter((line) => /\b(should|need to|next|todo|follow up|action)\b/i.test(line.text))
+    .slice(0, 4)
+    .map((line, index) => ({ id: `act-${index}`, text: line.text, checked: index === 0 }));
+
+  return {
+    status: "ready",
+    title: record.title,
+    overview: text
+      ? `This session covered ${(keyPoints.length ? keyPoints : [{ title: "conversation context" }]).map((point) => point.title).slice(0, 3).join(", ")}.`
+      : "This session did not contain enough transcript content for a detailed summary.",
+    keyPoints: keyPoints.length ? keyPoints : [
+      { id: "kp-empty", title: "Conversation context", details: ["No major themes were detected yet."] },
+    ],
+    actionItems: actionItems.length ? actionItems : [
+      { id: "act-review", text: "Review the transcript and choose the next follow-up.", checked: false },
+    ],
+    emptyReason: text ? undefined : "too_short",
+    generatedAt: new Date().toISOString(),
   };
 }
 
 export default function App() {
-  const [view, setView] = useState<View>("live");
-  const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
-  const [conversation, setConversation] = useState<Conversation | null>(null);
-  const [transcript, setTranscript] = useState<TranscriptChunk[]>([]);
-  const [cues, setCues] = useState<Cue[]>([]);
-  const [summary, setSummary] = useState<ConversationSummary | null>(null);
-  const [history, setHistory] = useState<HistoryRecord[]>([]);
-  const [selectedHistoryId, setSelectedHistoryId] = useState<string>("");
-  const [speechState, setSpeechState] = useState<SpeechState>(initialSpeechState);
-  const [speechMessage, setSpeechMessage] = useState("");
-  const [interimTranscript, setInterimTranscript] = useState("");
-  const [manualText, setManualText] = useState("");
-  const [lastAck, setLastAck] = useState<TranscriptAckEvent | null>(null);
-  const [pendingCueJob, setPendingCueJob] = useState(false);
-  const [pendingSummaryJob, setPendingSummaryJob] = useState(false);
-  const [elapsedTick, setElapsedTick] = useState(0);
+  const [screen, setScreen] = useState<Screen>("home");
+  const [settings, setSettings] = useState<ConversationSettings>(DEFAULT_SETTINGS);
+  const [records, setRecords] = useState<ConversationRecord[]>(SAMPLE_RECORDS);
+  const [prenotes, setPrenotes] = useState<Prenote[]>(SAMPLE_PRENOTES);
+  const [cues, setCues] = useState<AiCue[]>([]);
+  const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
+  const [liveTab, setLiveTab] = useState<ConversationTab>("transcript");
+  const [historyTab, setHistoryTab] = useState<ConversationTab>("summary");
+  const [activeRecordId, setActiveRecordId] = useState<string>("");
+  const [noteDraft, setNoteDraft] = useState<Prenote | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [connectionStatus, setConnectionStatus] = useState("ready");
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [activeStartedAt, setActiveStartedAt] = useState<Date | null>(null);
+  const [activeRecordTitle, setActiveRecordTitle] = useState("New conversation");
+  const [swipedRecordId, setSwipedRecordId] = useState<string | null>(null);
+  const [selectedCueDetail, setSelectedCueDetail] = useState<AiCue | null>(null);
 
-  const conversationRef = useRef<Conversation | null>(null);
-  const transcriptRef = useRef<TranscriptChunk[]>([]);
-  const cuesRef = useRef<Cue[]>([]);
-  const pendingCueRef = useRef(false);
+  const activePrenote = useMemo(() => selectedPrenote(prenotes), [prenotes]);
+  const activeRecord = records.find((record) => record.id === activeRecordId) || records[0] || null;
+
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const shouldListenRef = useRef(false);
-  const replayTimersRef = useRef<number[]>([]);
-  const workerTimersRef = useRef<number[]>([]);
-
-  const activeHistory = history.find((record) => record.conversation.conversationId === selectedHistoryId) ?? history[0] ?? null;
-  const liveDuration = conversation ? durationLabel(conversation.startedAt, conversation.endedAt) : "00:00";
-  const displayedTranscript = view === "history" && activeHistory ? activeHistory.transcript : transcript;
-  const displayedCues = view === "history" && activeHistory ? activeHistory.cues : cues;
-  const displayedSummary = view === "history" && activeHistory ? activeHistory.summary : summary;
-
-  const statusLabel = useMemo(() => {
-    if (connectionState === "connected") return "Connected";
-    if (connectionState === "replaying") return "Replay running";
-    if (connectionState === "summary-pending") return "Summary pending";
-    if (connectionState === "summary-ready") return "Summary ready";
-    return "Idle";
-  }, [connectionState]);
-
-  const speechTitle = useMemo(() => {
-    if (speechState === "listening") return "Listening";
-    if (speechState === "starting") return "Starting microphone";
-    if (speechState === "unsupported") return "Speech recognition unavailable";
-    if (speechState === "blocked") return "Microphone unavailable";
-    if (speechState === "error") return "Recognition stopped";
-    return conversation?.status === "ACTIVE" ? "Microphone ready" : "Start a conversation";
-  }, [conversation?.status, speechState]);
-
-  const speechCopy = useMemo(() => {
-    if (speechMessage) return speechMessage;
-    if (speechState === "unsupported") return "Use Chrome or Edge for browser speech recognition, or use the fallback transcript input.";
-    if (speechState === "blocked") return "Microphone access requires HTTPS or localhost. The plain HTTP S3 website link cannot use the mic.";
-    if (conversation?.status === "ACTIVE") return "CueFlow will append final recognized speech to the transcript in real time.";
-    return "Start a session to open the real-time transcription channel.";
-  }, [conversation?.status, speechMessage, speechState]);
-
-  const showManualFallback = speechState === "unsupported" || speechState === "blocked" || speechState === "error";
-  const canStartMic = Boolean(
-    conversation?.status === "ACTIVE"
-      && speechState !== "listening"
-      && speechState !== "starting"
-      && speechState !== "unsupported"
-      && speechState !== "blocked",
-  );
+  const activeConversationIdRef = useRef<string | null>(null);
+  const transcriptRef = useRef<TranscriptLine[]>([]);
+  const cuesRef = useRef<AiCue[]>([]);
+  const cueTimerRef = useRef<number | null>(null);
+  const recordPointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const skipNextRecordClickRef = useRef(false);
 
   useEffect(() => {
-    conversationRef.current = conversation;
-  }, [conversation]);
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
 
   useEffect(() => {
-    if (!conversation || conversation.status !== "ACTIVE") return;
-    const interval = window.setInterval(() => setElapsedTick((current) => current + 1), 1000);
+    transcriptRef.current = transcript;
+  }, [transcript]);
+
+  useEffect(() => {
+    cuesRef.current = cues;
+  }, [cues]);
+
+  useEffect(() => {
+    if (!isListening) return;
+    const interval = window.setInterval(() => setElapsedSeconds((current) => current + 1), 1000);
     return () => window.clearInterval(interval);
-  }, [conversation]);
+  }, [isListening]);
 
   useEffect(() => () => {
     shouldListenRef.current = false;
     recognitionRef.current?.abort();
-    replayTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    workerTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    if (cueTimerRef.current) window.clearTimeout(cueTimerRef.current);
   }, []);
-
-  function clearTimers() {
-    replayTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    workerTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    replayTimersRef.current = [];
-    workerTimersRef.current = [];
-  }
 
   function createRecognition(): SpeechRecognitionLike | null {
     if (!window.isSecureContext) {
-      setSpeechState("blocked");
-      setSpeechMessage("Microphone transcription requires HTTPS or localhost.");
+      setConnectionStatus("microphone requires https");
       return null;
     }
-
     const Recognition = getSpeechRecognitionConstructor();
     if (!Recognition) {
-      setSpeechState("unsupported");
-      setSpeechMessage("This browser does not support built-in speech recognition.");
+      setConnectionStatus("speech recognition unavailable");
       return null;
     }
 
     const recognition = new Recognition();
     recognition.continuous = true;
     recognition.interimResults = true;
-    recognition.lang = navigator.language || "en-US";
+    recognition.lang = settings.language === "chinese" ? "zh-CN" : settings.language === "auto" ? navigator.language : "en-US";
 
     recognition.onstart = () => {
-      setSpeechState("listening");
-      setSpeechMessage("Listening. Speak normally and CueFlow will append final transcript segments.");
+      setConnectionStatus("listening");
     };
 
     recognition.onresult = (event) => {
       let finalText = "";
-      let interimText = "";
+      let partialText = "";
 
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
-        const transcriptText = result[0]?.transcript?.trim() ?? "";
-        if (!transcriptText) continue;
-        if (result.isFinal) {
-          finalText = `${finalText} ${transcriptText}`.trim();
-        } else {
-          interimText = `${interimText} ${transcriptText}`.trim();
-        }
+        const text = result[0]?.transcript?.trim() ?? "";
+        if (!text) continue;
+        if (result.isFinal) finalText = `${finalText} ${text}`.trim();
+        else partialText = `${partialText} ${text}`.trim();
       }
 
-      setInterimTranscript(interimText);
+      if (partialText) {
+        upsertPartialTranscript(partialText);
+      }
       if (finalText) {
         appendTranscript(finalText);
       }
@@ -406,499 +499,687 @@ export default function App() {
 
     recognition.onerror = (event) => {
       if (event.error === "no-speech") {
-        setSpeechMessage("Still listening. No speech detected yet.");
+        setConnectionStatus("listening");
         return;
       }
-
       shouldListenRef.current = false;
-      setInterimTranscript("");
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        setSpeechState("blocked");
-        setSpeechMessage("Microphone permission was blocked. Allow microphone access and start again.");
-      } else {
-        setSpeechState("error");
-        setSpeechMessage(`Speech recognition stopped: ${event.error}.`);
-      }
+      setIsListening(false);
+      setConnectionStatus(event.error === "not-allowed" || event.error === "service-not-allowed"
+        ? "microphone blocked"
+        : `audio error: ${event.error}`);
     };
 
     recognition.onend = () => {
-      const shouldRestart = shouldListenRef.current && conversationRef.current?.status === "ACTIVE";
-      if (!shouldRestart) {
-        setInterimTranscript("");
-        setSpeechState((current) => current === "listening" || current === "starting" ? "idle" : current);
-        return;
-      }
-
+      const shouldRestart = shouldListenRef.current && Boolean(activeConversationIdRef.current);
+      if (!shouldRestart) return;
       window.setTimeout(() => {
         try {
           recognition.start();
         } catch {
-          setSpeechState("error");
-          setSpeechMessage("Speech recognition could not restart automatically.");
+          setConnectionStatus("listening");
         }
-      }, 300);
+      }, 260);
     };
 
     return recognition;
   }
 
-  function startSpeechRecognition(activeConversation = conversationRef.current) {
-    if (!activeConversation || activeConversation.status !== "ACTIVE") return;
-
+  function startRecognition() {
     const recognition = recognitionRef.current ?? createRecognition();
     if (!recognition) return;
-
     recognitionRef.current = recognition;
     shouldListenRef.current = true;
-    setInterimTranscript("");
-    setSpeechState("starting");
-    setSpeechMessage("Starting microphone...");
-
     try {
       recognition.start();
+      setConnectionStatus("connecting audio");
     } catch {
-      setSpeechState("listening");
+      setConnectionStatus("listening");
     }
   }
 
-  function stopSpeechRecognition(message = "Microphone paused.") {
+  function stopRecognition(nextStatus = "paused") {
     shouldListenRef.current = false;
-    setInterimTranscript("");
-    if (speechState !== "unsupported" && speechState !== "blocked") {
-      setSpeechState("idle");
-    }
-    setSpeechMessage(message);
     try {
       recognitionRef.current?.stop();
     } catch {
       recognitionRef.current?.abort();
     }
+    setConnectionStatus(nextStatus);
   }
 
-  function startConversation() {
-    clearTimers();
-    const startedAt = isoNow();
-    const nextConversation: Conversation = {
-      conversationId: `conv_${Date.now().toString(36)}`,
-      userId: "demo-user",
-      status: "ACTIVE",
-      startedAt,
-      endedAt: null,
-      cueCount: 0,
-      summaryStatus: "NOT_STARTED",
-    };
-    conversationRef.current = nextConversation;
-    transcriptRef.current = [];
-    cuesRef.current = [];
-    pendingCueRef.current = false;
-    setConversation(nextConversation);
-    setTranscript([]);
-    setCues([]);
-    setSummary(null);
-    setLastAck(null);
-    setPendingCueJob(false);
-    setPendingSummaryJob(false);
-    setConnectionState("connected");
-    setElapsedTick(0);
-    setView("live");
-    startSpeechRecognition(nextConversation);
+  function upsertPartialTranscript(text: string) {
+    const conversationId = activeConversationIdRef.current;
+    if (!conversationId) return;
+    const time = elapsedLabel(elapsedSeconds);
+    setTranscript((current) => {
+      const withoutPartial = current.filter((line) => !line.partial);
+      const next = [...withoutPartial, { id: "partial", time, text, partial: true }];
+      transcriptRef.current = next;
+      return next;
+    });
   }
 
   function appendTranscript(text: string) {
-    const activeConversation = conversationRef.current;
-    if (!activeConversation || activeConversation.status !== "ACTIVE") return;
-    const trimmed = text.trim();
-    if (!trimmed) return;
-
-    const createdAt = isoNow();
-    const chunk: TranscriptChunk = {
-      conversationId: activeConversation.conversationId,
-      chunkId: `${transcriptRef.current.length + 1}`.padStart(6, "0"),
-      speaker: "speaker_1",
-      text: trimmed,
-      clientTimestamp: createdAt,
-      createdAt,
-      s3Key: `raw/${activeConversation.conversationId}/chunks/${`${transcriptRef.current.length + 1}`.padStart(6, "0")}.json`,
+    const conversationId = activeConversationIdRef.current;
+    if (!conversationId) return;
+    const clean = text.trim();
+    if (!clean) return;
+    const line: TranscriptLine = {
+      id: `line-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      time: elapsedLabel(elapsedSeconds),
+      text: clean,
     };
-
-    const nextTranscript = [...transcriptRef.current, chunk];
-    transcriptRef.current = nextTranscript;
-    setTranscript(nextTranscript);
-    setLastAck({
-      eventType: "transcript.ack",
-      conversationId: activeConversation.conversationId,
-      chunkId: chunk.chunkId,
-      receivedAt: createdAt,
+    setTranscript((current) => {
+      const next = [...current.filter((item) => !item.partial), line];
+      transcriptRef.current = next;
+      maybeQueueCue(next);
+      return next;
     });
+  }
 
-    if (!pendingCueRef.current && shouldTriggerCue(nextTranscript, cuesRef.current)) {
-      pendingCueRef.current = true;
-      setPendingCueJob(true);
-      const timer = window.setTimeout(() => {
-        const context = transcriptRef.current.slice(-3);
-        const cue = buildCue(activeConversation.conversationId, context);
-        const nextCues = [cue, ...cuesRef.current];
-        cuesRef.current = nextCues;
-        setCues(nextCues);
-        setConversation((current) => current
-          ? { ...current, cueCount: nextCues.length }
-          : current);
-        pendingCueRef.current = false;
-        setPendingCueJob(false);
-      }, 750);
-      workerTimersRef.current.push(timer);
+  function maybeQueueCue(nextTranscript: TranscriptLine[]) {
+    if (!settings.autoCue || cueTimerRef.current || !shouldGenerateCue(nextTranscript, cuesRef.current)) return;
+    setConnectionStatus("cue queued");
+    cueTimerRef.current = window.setTimeout(() => {
+      const cue = buildCue(nextTranscript.slice(-4));
+      const nextCues = [cue, ...cuesRef.current];
+      cuesRef.current = nextCues;
+      setCues(nextCues);
+      setConnectionStatus(isListening ? "listening" : "paused");
+      cueTimerRef.current = null;
+    }, 650);
+  }
+
+  function togglePrenote(id: string) {
+    setPrenotes((current) => current.map((note) => note.id === id ? { ...note, selected: !note.selected } : note));
+  }
+
+  function openNewNote() {
+    setNoteDraft({
+      id: `pn-${Date.now()}`,
+      title: "New Note",
+      text: "",
+      selected: true,
+      files: [],
+    });
+    setScreen("noteEditor");
+  }
+
+  function saveNoteDraft() {
+    if (!noteDraft) return;
+    const firstLine = noteDraft.text.split(/\r?\n/).find((line) => line.trim())?.trim();
+    const nextNote = {
+      ...noteDraft,
+      title: firstLine ? firstLine.replace(/^#+\s*/, "").slice(0, 48) : noteDraft.title,
+    };
+    setPrenotes((current) => [nextNote, ...current.filter((note) => note.id !== nextNote.id)]);
+    setNoteDraft(null);
+    setScreen("home");
+  }
+
+  function addFiles(files: FileList | null) {
+    if (!noteDraft || !files?.length) return;
+    const existing = noteDraft.files;
+    const next: PrenoteFile[] = [];
+    for (const file of Array.from(files)) {
+      if (existing.length + next.length >= MAX_FILES) break;
+      if (file.size > MAX_FILE_SIZE) continue;
+      next.push({
+        id: `file-${Date.now()}-${next.length}`,
+        name: file.name,
+        sizeBytes: file.size,
+        status: "ready",
+      });
     }
-  }
-
-  function replayDemoTranscript() {
-    if (!conversation || conversation.status !== "ACTIVE") return;
-    stopSpeechRecognition("Microphone paused during demo replay.");
-    replayTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    replayTimersRef.current = [];
-    setConnectionState("replaying");
-    DEMO_TRANSCRIPT.forEach((line, index) => {
-      const timer = window.setTimeout(() => {
-        appendTranscript(line);
-        if (index === DEMO_TRANSCRIPT.length - 1) {
-          setConnectionState("connected");
-        }
-      }, index * 1150);
-      replayTimersRef.current.push(timer);
+    setNoteDraft({
+      ...noteDraft,
+      files: [...existing, ...next],
+      text: noteDraft.text || "Uploaded files will be summarized into prepared-note context in a later backend phase.",
     });
   }
 
-  function sendManualTranscript() {
-    appendTranscript(manualText);
-    setManualText("");
+  function startConversation() {
+    const startedAt = new Date();
+    const id = `conv-${Date.now().toString(36)}`;
+    setActiveConversationId(id);
+    activeConversationIdRef.current = id;
+    setActiveStartedAt(startedAt);
+    setActiveRecordTitle("New conversation");
+    setElapsedSeconds(0);
+    setCues([]);
+    setTranscript([]);
+    transcriptRef.current = [];
+    cuesRef.current = [];
+    setLiveTab("transcript");
+    setIsListening(true);
+    setScreen("live");
+    startRecognition();
   }
 
   function endConversation() {
-    if (!conversation || conversation.status !== "ACTIVE") return;
-    stopSpeechRecognition("Microphone stopped.");
-    replayTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    replayTimersRef.current = [];
-    const endedAt = isoNow();
-    const endedConversation: Conversation = {
-      ...conversation,
-      status: "ENDED",
-      endedAt,
-      summaryStatus: "PENDING",
-      cueCount: cuesRef.current.length,
+    stopRecognition("saving");
+    setIsListening(false);
+    const finalTranscript = transcriptRef.current.filter((line) => !line.partial);
+    const finalCues = cuesRef.current;
+    const startedAt = activeStartedAt ?? new Date();
+    const title = finalTranscript[0]?.text.slice(0, 52) || activeRecordTitle;
+    const draftRecord: ConversationRecord = {
+      id: activeConversationIdRef.current ?? `record-${Date.now().toString(36)}`,
+      title,
+      startedAt: formatRecordDate(startedAt),
+      location: "CueFlow",
+      duration: elapsedLabel(elapsedSeconds),
+      summary: {
+        status: "queued",
+        title,
+        overview: "AI summary is being generated...",
+        keyPoints: [],
+        actionItems: [],
+      },
+      transcript: finalTranscript,
+      cueHistory: finalCues,
+      usedPrenote: activePrenote ?? undefined,
     };
-    conversationRef.current = endedConversation;
-    setConversation(endedConversation);
-    setPendingSummaryJob(true);
-    setConnectionState("summary-pending");
-
-    const timer = window.setTimeout(() => {
-      const nextSummary = buildSummary(endedConversation.conversationId, transcriptRef.current);
-      const readyConversation: Conversation = {
-        ...endedConversation,
-        summaryStatus: "READY",
-      };
-      conversationRef.current = readyConversation;
-      const record: HistoryRecord = {
-        conversation: readyConversation,
-        transcript: transcriptRef.current,
-        cues: cuesRef.current,
-        summary: nextSummary,
-      };
-      setConversation(readyConversation);
-      setSummary(nextSummary);
-      setHistory((current) => [record, ...current.filter((item) => item.conversation.conversationId !== readyConversation.conversationId)]);
-      setSelectedHistoryId(readyConversation.conversationId);
-      setPendingSummaryJob(false);
-      setConnectionState("summary-ready");
-    }, 950);
-    workerTimersRef.current.push(timer);
+    const readyRecord = {
+      ...draftRecord,
+      summary: buildSummary(draftRecord),
+    };
+    setRecords((current) => [readyRecord, ...current.filter((record) => record.id !== readyRecord.id)]);
+    setActiveRecordId(readyRecord.id);
+    setActiveConversationId(null);
+    activeConversationIdRef.current = null;
+    setConnectionStatus("ready");
+    setHistoryTab("summary");
+    setScreen("history");
   }
 
-  function clearSession() {
-    clearTimers();
-    stopSpeechRecognition("Microphone stopped.");
-    conversationRef.current = null;
-    transcriptRef.current = [];
-    cuesRef.current = [];
-    pendingCueRef.current = false;
-    setConversation(null);
-    setTranscript([]);
-    setCues([]);
-    setSummary(null);
-    setLastAck(null);
-    setPendingCueJob(false);
-    setPendingSummaryJob(false);
-    setConnectionState("idle");
-    setManualText("");
-    setElapsedTick(0);
+  function togglePauseConversation() {
+    if (!activeConversationIdRef.current) return;
+    if (isListening) {
+      setIsListening(false);
+      stopRecognition("paused");
+    } else {
+      setIsListening(true);
+      startRecognition();
+    }
   }
 
-  function openHistory(record: HistoryRecord) {
-    setSelectedHistoryId(record.conversation.conversationId);
-    setView("history");
+  function openHistoryRecord(id: string) {
+    if (swipedRecordId === id) {
+      setSwipedRecordId(null);
+      return;
+    }
+    setSelectedCueDetail(null);
+    setActiveRecordId(id);
+    setHistoryTab("summary");
+    setScreen("history");
+  }
+
+  function handleRecordPointerDown(id: string, event: { clientX: number; clientY: number }) {
+    recordPointerRef.current = { id, x: event.clientX, y: event.clientY };
+  }
+
+  function handleRecordPointerUp(id: string, event: { clientX: number; clientY: number }) {
+    const start = recordPointerRef.current;
+    recordPointerRef.current = null;
+    if (!start || start.id !== id) return;
+    const deltaX = event.clientX - start.x;
+    const deltaY = event.clientY - start.y;
+    if (Math.abs(deltaX) < 38 || Math.abs(deltaX) < Math.abs(deltaY)) return;
+    skipNextRecordClickRef.current = true;
+    setSwipedRecordId(deltaX < 0 ? id : null);
+  }
+
+  function handleRecordClick(id: string) {
+    if (skipNextRecordClickRef.current) {
+      skipNextRecordClickRef.current = false;
+      return;
+    }
+    openHistoryRecord(id);
+  }
+
+  function deleteHistoryRecord(id: string) {
+    setRecords((current) => current.filter((record) => record.id !== id));
+    setSwipedRecordId(null);
+    if (activeRecordId === id) setActiveRecordId("");
+  }
+
+  function renderHeader(title: string, right?: React.ReactNode, backTarget: Screen = "home") {
+    return (
+      <header className="topbar">
+        <button className="icon-button" aria-label="Back" onClick={() => setScreen(backTarget)}>
+          <ArrowLeft size={27} strokeWidth={1.5} />
+        </button>
+        <h1>{title}</h1>
+        <div className="topbar-right">{right}</div>
+      </header>
+    );
+  }
+
+  if (screen === "settings") {
+    return (
+      <main className="phone-shell">
+        {renderHeader("Settings", <span />, "home")}
+        <section className="settings-section">
+          <h2>Voice Input</h2>
+          <div className="setting-card tall locked">
+            <div className="setting-choice">Phone microphone <Check size={28} /></div>
+          </div>
+          <p className="muted-copy">CueFlow uses the phone browser microphone for live transcription.</p>
+        </section>
+        <section className="settings-section">
+          <h2>Language</h2>
+          <button className="setting-row" onClick={() => setSettings({
+            ...settings,
+            language: settings.language === "english" ? "chinese" : settings.language === "chinese" ? "auto" : "english",
+          })}>
+            <span>Speech language</span>
+            <span>{settings.language === "english" ? "English" : settings.language === "chinese" ? "Chinese" : "Auto"} <ChevronRight size={25} /></span>
+          </button>
+        </section>
+        <section className="settings-section">
+          <div className="setting-card">
+            <label className="switch-row">
+              <span>Automatic AI cues</span>
+              <input type="checkbox" checked={settings.autoCue} onChange={(event) => setSettings({ ...settings, autoCue: event.target.checked })} />
+            </label>
+            <button className="setting-row" onClick={() => setSettings({
+              ...settings,
+              cueDuration: settings.cueDuration === 5000 ? 10000 : settings.cueDuration === 10000 ? 15000 : settings.cueDuration === 15000 ? "forever" : 5000,
+            })}>
+              <span>Cue duration</span>
+              <span>{settings.cueDuration === "forever" ? "Pinned" : `${settings.cueDuration / 1000}s`} <ChevronRight size={25} /></span>
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (screen === "noteEditor" && noteDraft) {
+    return (
+      <main className="phone-shell modal-page">
+        <header className="modal-header">
+          <h1>New Note</h1>
+          <button className="icon-button" aria-label="Cancel" onClick={() => setScreen("home")}>
+            <X size={37} strokeWidth={1.35} />
+          </button>
+        </header>
+        <section className="note-editor">
+          <textarea
+            maxLength={5000}
+            value={noteDraft.text}
+            placeholder="Add context that CueFlow should remember during the live session."
+            onChange={(event) => setNoteDraft({ ...noteDraft, text: event.target.value })}
+          />
+          <span className="char-count">{noteDraft.text.length}/5000</span>
+        </section>
+        <section className="file-section">
+          <label className="file-add">
+            <Plus size={32} strokeWidth={1.6} />
+            <input
+              type="file"
+              multiple
+              accept=".txt,.md,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.heic"
+              onChange={(event) => addFiles(event.target.files)}
+            />
+          </label>
+          <p>Attach up to 5 files. Each file can be up to 5 MB.</p>
+          {noteDraft.files.map((file) => (
+            <div className="file-pill" key={file.id}>
+              <Upload size={17} />
+              <span>{file.name}</span>
+              <small>{formatFileSize(file.sizeBytes)}</small>
+            </div>
+          ))}
+        </section>
+        <section className="note-info">
+          <Square size={23} strokeWidth={1.5} />
+          <p>Prepared notes help CueFlow generate more relevant cues and summaries during the session.</p>
+        </section>
+        <footer className="bottom-actions">
+          <button className="soft-danger" onClick={() => setNoteDraft(null)}>
+            Delete
+          </button>
+          <button className="muted-action" disabled={!noteDraft.text.trim() && !noteDraft.files.length} onClick={saveNoteDraft}>
+            Save
+          </button>
+        </footer>
+      </main>
+    );
+  }
+
+  if (screen === "conversationSettings") {
+    return (
+      <main className="phone-shell">
+        {renderHeader("Conversation Settings", <span />, "live")}
+        <section className="settings-section">
+          <h2>Voice Input</h2>
+          <div className="setting-card tall locked">
+            <div className="setting-choice">Phone microphone <Check size={28} /></div>
+          </div>
+        </section>
+        <section className="settings-section">
+          <h2>Live Behavior</h2>
+          <div className="setting-card">
+            <label className="switch-row">
+              <span>Automatic AI cues</span>
+              <input type="checkbox" checked={settings.autoCue} onChange={(event) => setSettings({ ...settings, autoCue: event.target.checked })} />
+            </label>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (screen === "live") {
+    const startedAtLabel = activeStartedAt ? `${formatClock(activeStartedAt)} - CueFlow` : "CueFlow";
+    return (
+      <main className="phone-shell live-page">
+        {renderHeader("Conversation", (
+          <button className="icon-button" aria-label="Conversation settings" onClick={() => setScreen("conversationSettings")}>
+            <MoreHorizontal size={33} strokeWidth={1.5} />
+          </button>
+        ), "home")}
+        <section className="conversation-title-card live-title">
+          <div>
+            <h2>{activeRecordTitle}</h2>
+            <p>{startedAtLabel}</p>
+            <p className="connection-status">Audio: {connectionStatus}</p>
+          </div>
+          <span className="live-duration"><span />{elapsedLabel(elapsedSeconds)}</span>
+        </section>
+        {renderTabs(liveTab, setLiveTab, Boolean(activePrenote))}
+        <section className="live-content">
+          {liveTab === "summary" && renderCuePanel(cues)}
+          {liveTab === "transcript" && renderTranscript(transcript, true)}
+          {liveTab === "prenote" && renderPrenote(activePrenote)}
+        </section>
+        <footer className="live-actions">
+          <button onClick={togglePauseConversation}>
+            <Pause size={29} strokeWidth={1.4} /> {isListening ? "Pause" : "Resume"}
+          </button>
+          <button onClick={endConversation}>
+            <X size={31} strokeWidth={1.35} /> End
+          </button>
+        </footer>
+      </main>
+    );
+  }
+
+  if (screen === "history" && activeRecord) {
+    return (
+      <main className="phone-shell">
+        {renderHeader("Conversation", (
+          <button className="icon-button" aria-label="More">
+            <MoreHorizontal size={33} strokeWidth={1.5} />
+          </button>
+        ), "home")}
+        <section className="conversation-title-card">
+          <div>
+            <h2>{activeRecord.title}</h2>
+            <p>{activeRecord.startedAt} - {activeRecord.location}</p>
+          </div>
+          <span>{activeRecord.duration}</span>
+        </section>
+        {renderTabs(historyTab, setHistoryTab, Boolean(activeRecord.usedPrenote))}
+        <section className="history-content">
+          {historyTab === "summary" && renderSummary(activeRecord, setSelectedCueDetail)}
+          {historyTab === "transcript" && renderTranscript(activeRecord.transcript)}
+          {historyTab === "prenote" && renderPrenote(activeRecord.usedPrenote || null)}
+        </section>
+        {selectedCueDetail && renderCueDetailModal(selectedCueDetail, () => setSelectedCueDetail(null))}
+      </main>
+    );
   }
 
   return (
-    <main className="phone-shell">
-      <header className="app-header">
-        <button className="brand-mark" aria-label="CueFlow live view" onClick={() => setView("live")}>
-          <Sparkles size={22} strokeWidth={1.8} />
+    <main className="phone-shell home-page">
+      <header className="home-header">
+        <button className="corner-mark" aria-label="Main">
+          <span />
         </button>
-        <div>
-          <p className="eyebrow">Conversation Intelligence</p>
-          <h1>CueFlow</h1>
-        </div>
-        <span className={`status-dot ${connectionState}`}>{statusLabel}</span>
+        <h1>Sessions</h1>
+        <button className="icon-button" aria-label="Settings" onClick={() => setScreen("settings")}>
+          <Settings2 size={33} strokeWidth={1.55} />
+        </button>
       </header>
 
-      <nav className="view-tabs" aria-label="CueFlow views">
-        <button className={view === "live" ? "active" : ""} onClick={() => setView("live")}>
-          <Radio size={17} /> Live Conversation
-        </button>
-        <button className={view === "history" ? "active" : ""} onClick={() => setView("history")}>
-          <History size={17} /> Conversation History
-        </button>
-      </nav>
-
-      {view === "live" ? (
-        <>
-          <section className="session-panel">
-            <div>
-              <p className="panel-label">Live Conversation</p>
-              <h2>{conversation ? dateLabel(conversation.startedAt) : "Ready"}</h2>
-              <p className="session-meta">
-                {conversation ? `${conversation.status} - ${liveDuration}` : "Start a session to open live transcription."}
-              </p>
-            </div>
-            <div className="metric-grid">
-              <span><strong>{transcript.length}</strong> Transcript</span>
-              <span><strong>{cues.length}</strong> AI Cues</span>
-              <span><strong>{pendingCueJob ? 1 : 0}</strong> Queue</span>
-            </div>
-          </section>
-
-          <section className="action-grid" aria-label="Conversation controls">
-            <button className="primary-action" onClick={startConversation}>
-              <Play size={20} /> Start Conversation
-            </button>
-            <button disabled={!conversation || conversation.status !== "ACTIVE"} onClick={replayDemoTranscript}>
-              <ListRestart size={20} /> Replay Demo Transcript
-            </button>
-            <button disabled={!conversation || conversation.status !== "ACTIVE"} onClick={endConversation}>
-              <Square size={18} /> End Conversation
-            </button>
-            <button onClick={clearSession}>
-              <Trash2 size={18} /> Clear Session
-            </button>
-          </section>
-
-          <section className={`voice-panel ${speechState}`}>
-            <div className="voice-heading">
-              <span className="voice-icon">
-                {speechState === "blocked" || speechState === "unsupported" || speechState === "error"
-                  ? <AlertCircle size={20} />
-                  : <Mic size={20} />}
-              </span>
-              <div>
-                <p className="panel-label">Live Transcription</p>
-                <h2>{speechTitle}</h2>
-              </div>
-            </div>
-            <p className="voice-copy">{speechCopy}</p>
-            {interimTranscript ? <p className="interim-transcript">{interimTranscript}</p> : null}
-            <div className="voice-actions">
-              <button disabled={!canStartMic} onClick={() => startSpeechRecognition()}>
-                <Mic size={18} /> Start Mic
+      <section className="record-section">
+        <div className="section-row">
+          <h2>My Records</h2>
+          <span>{records.length}</span>
+        </div>
+        <div className="record-list">
+          {records.map((record) => (
+            <div className={swipedRecordId === record.id ? "record-row swiped" : "record-row"} key={record.id}>
+              <button className="record-delete-button" onClick={() => deleteHistoryRecord(record.id)}>
+                Delete
               </button>
-              <button disabled={speechState !== "listening" && speechState !== "starting"} onClick={() => stopSpeechRecognition()}>
-                <MicOff size={18} /> Stop Mic
+              <button
+                className="record-card"
+                onClick={() => handleRecordClick(record.id)}
+                onPointerDown={(event) => handleRecordPointerDown(record.id, event)}
+                onPointerUp={(event) => handleRecordPointerUp(record.id, event)}
+                onPointerCancel={() => {
+                  recordPointerRef.current = null;
+                }}
+              >
+                <div>
+                  <h3>{record.title}</h3>
+                  <p>{record.startedAt} - {record.location}</p>
+                </div>
+                <ChevronRight size={34} strokeWidth={1.4} />
               </button>
             </div>
-          </section>
-
-          {showManualFallback ? (
-            <section className="manual-send">
-              <textarea
-                value={manualText}
-                placeholder="Fallback transcript input"
-                rows={3}
-                onChange={(event) => setManualText(event.target.value)}
-              />
-              <button disabled={!conversation || conversation.status !== "ACTIVE" || !manualText.trim()} onClick={sendManualTranscript}>
-                <Send size={18} /> Send Fallback Transcript
-              </button>
-            </section>
-          ) : null}
-
-          <ConnectionStatus
-            state={statusLabel}
-            ack={lastAck}
-            pendingCueJob={pendingCueJob}
-            pendingSummaryJob={pendingSummaryJob}
-          />
-        </>
-      ) : (
-        <HistoryPanel
-          history={history}
-          activeId={activeHistory?.conversation.conversationId ?? ""}
-          onOpen={openHistory}
-        />
-      )}
-
-      <section className="content-grid">
-        <TranscriptPanel chunks={displayedTranscript} />
-        <CueList cues={displayedCues} />
-        <SummaryPanel summary={displayedSummary} pending={pendingSummaryJob && view === "live"} />
+          ))}
+        </div>
       </section>
 
-      <footer className="bottom-bar">
-        <button onClick={() => setView("live")}>
-          <MessageSquareText size={19} /> Live Conversation
+      <section className="prenote-dock">
+        <h2>Prepared Notes</h2>
+        <div className="prenote-row">
+          <button className="add-note-card" onClick={openNewNote}>
+            <Plus size={45} strokeWidth={1.45} />
+          </button>
+          {prenotes.map((note) => (
+            <button className="prenote-card" key={note.id} onClick={() => togglePrenote(note.id)}>
+              <span className={note.selected ? "note-checkbox checked" : "note-checkbox"}>{note.selected && <Check size={18} />}</span>
+              <h3>{note.title}</h3>
+              <p>{note.text.split(/\r?\n/).slice(0, 2).join(" ")}</p>
+            </button>
+          ))}
+        </div>
+        <button className="start-button" onClick={startConversation}>
+          <span>-&gt;</span> Start
         </button>
-        <button onClick={() => setView("history")}>
-          <History size={19} /> View History
-        </button>
-        <button onClick={clearSession}>
-          <RotateCcw size={19} /> Reset
-        </button>
-      </footer>
+      </section>
     </main>
   );
 }
 
-function ConnectionStatus({
-  state,
-  ack,
-  pendingCueJob,
-  pendingSummaryJob,
-}: {
-  state: string;
-  ack: TranscriptAckEvent | null;
-  pendingCueJob: boolean;
-  pendingSummaryJob: boolean;
-}) {
+function renderTabs(active: ConversationTab, setActive: (tab: ConversationTab) => void, hasPrenote: boolean) {
+  const tabs: Array<{ key: ConversationTab; label: string }> = [
+    { key: "summary", label: "AI Summary" },
+    { key: "transcript", label: "Transcript" },
+  ];
+  if (hasPrenote) tabs.push({ key: "prenote", label: "Prepared Notes" });
   return (
-    <section className="status-panel">
-      <div>
-        <p>Connection Status</p>
-        <strong>{state}</strong>
-      </div>
-      <div>
-        <p>Last Ack</p>
-        <strong>{ack ? ack.chunkId : "-"}</strong>
-      </div>
-      <div>
-        <p>Worker State</p>
-        <strong>{pendingCueJob ? "Cue queued" : pendingSummaryJob ? "Summary queued" : "Ready"}</strong>
-      </div>
-    </section>
+    <nav className="tabs">
+      {tabs.map((tab) => (
+        <button key={tab.key} className={active === tab.key ? "active" : ""} onClick={() => setActive(tab.key)}>
+          {tab.label}
+        </button>
+      ))}
+    </nav>
   );
 }
 
-function TranscriptPanel({ chunks }: { chunks: TranscriptChunk[] }) {
+function renderCuePanel(cues: AiCue[]) {
   return (
-    <section className="panel transcript-panel">
-      <header className="section-title">
-        <h2>Transcript</h2>
-        <span>{chunks.length}</span>
-      </header>
-      <div className="transcript-list">
-        {chunks.length ? chunks.map((chunk) => (
-          <article className="transcript-row" key={chunk.chunkId}>
-            <time>{timeLabel(chunk.createdAt)}</time>
-            <p>{chunk.text}</p>
-          </article>
-        )) : <p className="empty-state">No transcript yet.</p>}
-      </div>
-    </section>
-  );
-}
-
-function CueList({ cues }: { cues: Cue[] }) {
-  return (
-    <section className="panel">
-      <header className="section-title">
+    <div className="summary-stack">
+      <section className="summary-card">
         <h2>AI Cues</h2>
-        <span>{cues.length}</span>
-      </header>
-      <div className="cue-list">
-        {cues.length ? cues.map((cue) => (
-          <article className={`cue-card ${CUE_STYLE[cue.type]}`} key={cue.cueId}>
-            <div className="cue-card-header">
-              <span>{cue.type}</span>
-              <time>{timeLabel(cue.createdAt)}</time>
-            </div>
-            <h3>{cue.title}</h3>
-            <p>{cue.shortText}</p>
-            <small>{cue.detailText}</small>
-          </article>
-        )) : <p className="empty-state">No AI cues yet.</p>}
-      </div>
-    </section>
-  );
-}
-
-function SummaryPanel({ summary, pending }: { summary: ConversationSummary | null; pending: boolean }) {
-  return (
-    <section className="panel summary-panel">
-      <header className="section-title">
-        <h2>Conversation Summary</h2>
-        <span>{pending ? "Pending" : summary ? "Ready" : "-"}</span>
-      </header>
-      {summary ? (
-        <div className="summary-stack">
-          <p className="summary-copy">{summary.summary}</p>
-          <SummaryList title="Key Topics" items={summary.keyTopics} />
-          <SummaryList title="Action Items" items={summary.actionItems} />
-          <SummaryList title="Risks" items={summary.risks} />
+        <div className="cue-list">
+          {cues.length ? cues.slice(0, 6).map((cue) => (
+            <article className="cue-row" key={cue.id}>
+              <span className="cue-icon">{cueIcon(cue.category)}</span>
+              <div>
+                <h3>{cue.title}</h3>
+                <p>{cue.output}</p>
+              </div>
+            </article>
+          )) : <p>-</p>}
         </div>
-      ) : (
-        <p className="empty-state">{pending ? "Summary generation is queued." : "No summary yet."}</p>
-      )}
-    </section>
-  );
-}
-
-function SummaryList({ title, items }: { title: string; items: string[] }) {
-  return (
-    <div className="summary-list">
-      <h3>{title}</h3>
-      <ul>
-        {items.map((item) => <li key={item}>{item}</li>)}
-      </ul>
+      </section>
     </div>
   );
 }
 
-function HistoryPanel({
-  history,
-  activeId,
-  onOpen,
-}: {
-  history: HistoryRecord[];
-  activeId: string;
-  onOpen: (record: HistoryRecord) => void;
-}) {
+function renderSummary(record: ConversationRecord, onCueSelect: (cue: AiCue) => void) {
+  const summary = record.summary;
+  const isReady = summary.status === "ready";
+  const overview = isReady
+    ? summary.emptyReason === "too_short"
+      ? "This conversation was too short for a detailed AI summary."
+      : summary.overview || "-"
+    : summary.status === "failed"
+      ? "AI summary generation failed. Transcript and cues are still available."
+      : summary.status === "queued" || summary.status === "running"
+        ? "AI summary is being generated..."
+        : "No AI summary yet.";
+
   return (
-    <section className="history-panel">
-      <header className="section-title">
-        <h2>Conversation History</h2>
-        <span>{history.length}</span>
-      </header>
-      <div className="history-list">
-        {history.length ? history.map((record) => (
-          <button
-            className={activeId === record.conversation.conversationId ? "history-row active" : "history-row"}
-            key={record.conversation.conversationId}
-            onClick={() => onOpen(record)}
-          >
-            <span>
-              <strong>{dateLabel(record.conversation.startedAt)}</strong>
-              <small>{record.transcript.length} transcript chunks - {record.cues.length} cues</small>
-            </span>
-            <em>{record.conversation.summaryStatus}</em>
+    <div className="summary-stack">
+      <section className="summary-card">
+        <h2>Conversation Summary</h2>
+        <p>{overview}</p>
+        <h2>Key Points</h2>
+        <ul className="key-point-list">
+          {summary.keyPoints.length ? summary.keyPoints.map((point) => (
+            <li className="key-point-item" key={point.id}>
+              <strong>{point.title}</strong>
+              {point.details.length ? (
+                <ul>
+                  {point.details.map((detail, index) => <li key={`${point.id}-${index}`}>{detail}</li>)}
+                </ul>
+              ) : null}
+            </li>
+          )) : <li>-</li>}
+        </ul>
+      </section>
+      <section className="summary-card">
+        <div className="card-title-row">
+          <h2>Action Items</h2>
+          <span>Export ({summary.actionItems.length}/{summary.actionItems.length}) -&gt;</span>
+        </div>
+        <div className="summary-action-list">
+          {summary.actionItems.length ? summary.actionItems.map((item) => (
+            <article className="summary-action-item" key={item.id}>
+              <span>{item.checked ? <Check size={17} strokeWidth={2.2} /> : null}</span>
+              <p>{item.text}</p>
+            </article>
+          )) : <p>-</p>}
+        </div>
+      </section>
+      {renderCueGroups(record.cueHistory, onCueSelect)}
+    </div>
+  );
+}
+
+function renderCueGroups(cues: AiCue[], onCueSelect: (cue: AiCue) => void) {
+  const groups = groupCuesByCategory(cues);
+  const visibleCategories = CUE_CATEGORY_ORDER.filter((category) => groups[category].length > 0);
+
+  return (
+    <section className="summary-card muted-cues">
+      <h2>AI Cues</h2>
+      {visibleCategories.length ? visibleCategories.map((category) => (
+        <details className="cue-group" key={category} open>
+          <summary>
+            <span>{cueIcon(category)}</span>
+            {cueLabel(category)}
+          </summary>
+          <div className="cue-chip-row">
+            {groups[category].map((cue) => (
+              <button className="cue-chip" key={cue.id} type="button" onClick={() => onCueSelect(cue)}>
+                <span>{cueIcon(cue.category)}</span>
+                {cue.title}
+              </button>
+            ))}
+          </div>
+        </details>
+      )) : <p>-</p>}
+    </section>
+  );
+}
+
+function renderCueDetailModal(cue: AiCue, onClose: () => void) {
+  return (
+    <div className="cue-modal-backdrop" role="presentation" onClick={onClose}>
+      <article className="cue-modal" role="dialog" aria-modal="true" aria-label={cue.title} onClick={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <span>{cueIcon(cue.category)}</span>
+            <h2>{cue.title}</h2>
+          </div>
+          <button type="button" aria-label="Close" onClick={onClose}>
+            <X size={24} strokeWidth={1.8} />
           </button>
-        )) : <p className="empty-state">No completed sessions yet.</p>}
-      </div>
+        </header>
+        <p>{cue.output}</p>
+      </article>
+    </div>
+  );
+}
+
+function renderTranscript(lines: TranscriptLine[], autoFollow = false) {
+  return <TranscriptCard lines={lines} autoFollow={autoFollow} />;
+}
+
+function TranscriptCard({ lines, autoFollow }: { lines: TranscriptLine[]; autoFollow: boolean }) {
+  const scrollRef = useRef<HTMLElement | null>(null);
+  const shouldFollowRef = useRef(true);
+  const lastLine = lines[lines.length - 1];
+
+  useEffect(() => {
+    if (!autoFollow || !shouldFollowRef.current) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    const frame = window.requestAnimationFrame(() => {
+      element.scrollTop = element.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoFollow, lines.length, lastLine?.id, lastLine?.text]);
+
+  function handleScroll() {
+    if (!autoFollow) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    shouldFollowRef.current = shouldAutoFollowTranscriptScroll({
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+      clientHeight: element.clientHeight,
+    });
+  }
+
+  return (
+    <section className="transcript-card" ref={scrollRef} onScroll={handleScroll}>
+      {lines.length ? lines.map((line) => (
+        <article className={line.partial ? "partial" : ""} key={line.id}>
+          <time>{line.time}</time>
+          <p>{line.text}</p>
+        </article>
+      )) : <p>-</p>}
+    </section>
+  );
+}
+
+function renderPrenote(note: Prenote | null) {
+  return (
+    <section className="summary-card prenote-readonly">
+      <h2>{note?.title || "Prepared Notes"}</h2>
+      <pre>{note?.text || "-"}</pre>
     </section>
   );
 }

@@ -2,7 +2,7 @@
 
 CueFlow is a mobile-first cloud-native conversation intelligence MVP for the CSCI 5411 term project.
 
-A user starts a live conversation, sends transcript chunks, receives lightweight AI cue cards, ends the session, and views a structured conversation summary and conversation history. The demo uses deterministic mock AI, so it does not require a microphone, STT provider, external hardware, or external LLM key.
+A user opens a session list, starts a live conversation, speaks through the phone/browser microphone, receives lightweight AI cue cards, ends the session, and views a structured conversation summary and conversation history. The UI keeps CueFlow independent from external hardware; deployed microphone transcription requires HTTPS or localhost.
 
 ## Architecture Summary
 
@@ -45,15 +45,15 @@ Open `http://localhost:5174`.
 
 ## Demo Steps
 
-1. Click Start Conversation.
-2. Click Replay Demo Transcript.
-3. Watch transcript chunks arrive.
-4. Watch AI cue cards appear.
-5. Click End Conversation.
-6. Wait for Conversation Summary.
-7. Click View History.
+1. Open the Sessions home page.
+2. Review My Records and Prepared Notes.
+3. Click Start.
+4. Allow microphone access and speak.
+5. Watch Transcript update inside the live Conversation page.
+6. Use Pause/Resume or End from the bottom action bar.
+7. Review the saved summary, transcript, and AI cues from the session record.
 
-The frontend includes a local real-time simulation so the demo works without cloud deployment.
+The frontend uses browser speech recognition on HTTPS or localhost. The UI still works without cloud deployment, while backend provider abstractions are available for deployed REST/WebSocket runtimes.
 
 ## Environment Variables
 
@@ -87,7 +87,7 @@ copy .env.example .env
 # edit .env and set OPENAI_API_KEY
 ```
 
-The current frontend demo runs in-browser with local mock behavior. The backend provider is ready for REST/WebSocket worker runtimes that instantiate `createAiProviderFromEnv()`.
+The current frontend runs in-browser with live microphone transcription and local cue/summary generation. The backend provider is ready for REST/WebSocket worker runtimes that instantiate `createAiProviderFromEnv()`.
 
 ## Deployment
 
@@ -181,7 +181,7 @@ On `main`, deploy runs only when `AWS_ROLE_ARN` is configured.
 ## Known Limitations
 
 - Lambda CDK resources currently use deployable placeholder handler code. The backend logic is implemented and tested, but a production deployment should add a bundling step that packages compiled backend handlers into Lambda assets.
-- Local UI uses an in-browser real-time simulation. It is ready for demo and can later be wired to deployed REST and WebSocket URLs.
+- Local UI uses browser speech recognition on localhost. It is ready for demo and can later be wired to deployed REST and WebSocket URLs.
 - Authentication is intentionally minimal for the MVP. A production version should add Cognito or a JWT authorizer and restrict CORS origins.
 - AWS integration tests are mocked locally to keep the course demo runnable without a permanent AWS environment.
 

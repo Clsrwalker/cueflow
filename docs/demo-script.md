@@ -18,13 +18,13 @@ npm run dev --workspace @cueflow/frontend
 Open `http://localhost:5174`.
 
 Click:
-1. Start Conversation.
-2. Replay Demo Transcript.
-3. Watch Transcript count increase.
-4. Watch AI Cues appear.
-5. End Conversation.
-6. Wait for Conversation Summary.
-7. Open Conversation History.
+1. Review the Sessions home page, My Records list, and Prepared Notes dock.
+2. Start a new session.
+3. Allow microphone access and speak.
+4. Open the Transcript tab and watch live speech text arrive.
+5. Open the AI Summary tab and watch cue cards appear as the session develops.
+6. End the conversation.
+7. Review the saved summary, transcript, and cue history.
 
 ## 3:00 - 5:00 Backend Design
 
