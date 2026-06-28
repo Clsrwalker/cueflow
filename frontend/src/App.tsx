@@ -166,10 +166,7 @@ type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["concept", "response", "suggestion", "person"];
 const AUTH_STORAGE_KEY = "cueflow.authUser";
-const OPENAI_KEY_STORAGE_KEY = "cueflow.openAiApiKey";
-const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-const DEFAULT_AI_MODEL = "gpt-5.4-nano";
-const DEFAULT_SUMMARY_MODEL = "gpt-5.5";
+const DEFAULT_AI_ENDPOINT = "/ai";
 
 const DEFAULT_SETTINGS: ConversationSettings = {
   language: "english",
@@ -400,35 +397,7 @@ function shouldGenerateCue(lines: TranscriptLine[], cues: AiCue[], prenote: Pren
 }
 
 function configuredAiEndpoint(): string {
-  return import.meta.env.VITE_CUEFLOW_AI_ENDPOINT?.trim() ?? "";
-}
-
-function configuredOpenAiKey(): string {
-  const buildKey = import.meta.env.VITE_OPENAI_API_KEY?.trim();
-  if (buildKey) return buildKey;
-  return storedOpenAiKey();
-}
-
-function storedOpenAiKey(): string {
-  try {
-    return window.localStorage.getItem(OPENAI_KEY_STORAGE_KEY)?.trim() ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function persistOpenAiKey(value: string): void {
-  try {
-    const trimmed = value.trim();
-    if (trimmed) window.localStorage.setItem(OPENAI_KEY_STORAGE_KEY, trimmed);
-    else window.localStorage.removeItem(OPENAI_KEY_STORAGE_KEY);
-  } catch {
-    // Browsers can deny localStorage in private modes; calls will still fail clearly.
-  }
-}
-
-function aiModel(defaultModel = DEFAULT_AI_MODEL): string {
-  return import.meta.env.VITE_OPENAI_MODEL?.trim() || defaultModel;
+  return import.meta.env.VITE_CUEFLOW_AI_ENDPOINT?.trim() || DEFAULT_AI_ENDPOINT;
 }
 
 function transcriptText(lines: TranscriptLine[]): string {
@@ -447,45 +416,8 @@ function cleanParagraph(value: unknown, max: number): string {
   return String(value ?? "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, max);
 }
 
-function extractJsonObject(text: string): string {
-  const cleaned = text.replace(/```json\n?/gi, "").replace(/```\n?/g, "").trim();
-  const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
-  return firstBrace >= 0 && lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
-}
-
-function extractResponseText(data: unknown): string {
-  const response = data && typeof data === "object" ? data as Record<string, unknown> : {};
-  if (typeof response.output_text === "string") return response.output_text.trim();
-
-  const texts: string[] = [];
-  const output = Array.isArray(response.output) ? response.output : [];
-  for (const item of output) {
-    const content = item && typeof item === "object" && Array.isArray((item as Record<string, unknown>).content)
-      ? (item as { content: unknown[] }).content
-      : [];
-    for (const contentItem of content) {
-      if (contentItem && typeof contentItem === "object") {
-        const text = (contentItem as Record<string, unknown>).text;
-        if (typeof text === "string") texts.push(text);
-      }
-    }
-  }
-  return texts.join("\n").trim();
-}
-
-function parseAiJson<T>(text: string, label: string): T {
-  const jsonText = extractJsonObject(text);
-  try {
-    return JSON.parse(jsonText) as T;
-  } catch {
-    throw new Error(`${label} response was not valid JSON.`);
-  }
-}
-
-async function requestAiEndpoint<T>(path: "cue" | "summary", payload: unknown): Promise<T | null> {
+async function requestAiEndpoint<T>(path: "cue" | "summary", payload: unknown): Promise<T> {
   const endpoint = configuredAiEndpoint();
-  if (!endpoint) return null;
   const response = await fetch(`${endpoint.replace(/\/+$/, "")}/${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -494,58 +426,6 @@ async function requestAiEndpoint<T>(path: "cue" | "summary", payload: unknown): 
   if (!response.ok) throw new Error(`AI endpoint failed (${response.status}).`);
   const data = await response.json() as Record<string, unknown>;
   return (data[path] ?? data.data ?? data) as T;
-}
-
-async function requestOpenAiJson<T>(params: {
-  label: string;
-  system: string;
-  prompt: string;
-  model?: string;
-  maxOutputTokens: number;
-  temperature?: number | null;
-}): Promise<T> {
-  const apiKey = configuredOpenAiKey();
-  if (!apiKey) {
-    throw new Error("OpenAI API key is not configured.");
-  }
-
-  const system = [
-    params.system,
-    "Return valid JSON only. Do not include markdown, explanation, or extra text.",
-  ].join("\n\n");
-  const body: Record<string, unknown> = {
-    model: params.model ?? aiModel(),
-    input: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: `${system}\n\n${params.prompt}`,
-          },
-        ],
-      },
-    ],
-    max_output_tokens: params.maxOutputTokens,
-  };
-  if (params.temperature !== null) {
-    body.temperature = params.temperature ?? 0.05;
-  }
-
-  const response = await fetch(OPENAI_RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw new Error(`OpenAI request failed (${response.status}).`);
-  }
-
-  const data = await response.json();
-  return parseAiJson<T>(extractResponseText(data), params.label);
 }
 
 function buildCuePrompt(lines: TranscriptLine[], prenote: Prenote | null, settings: ConversationSettings): string {
@@ -582,22 +462,7 @@ function normalizeAiCue(value: AiCueJson): AiCue | null {
 async function requestAiCue(lines: TranscriptLine[], prenote: Prenote | null, settings: ConversationSettings): Promise<AiCue | null> {
   const prompt = buildCuePrompt(lines, prenote, settings);
   const payload = { prompt, transcript: transcriptText(lines), prenote, settings };
-  const endpointResult = await requestAiEndpoint<AiCueJson>("cue", payload);
-  const raw = endpointResult ?? await requestOpenAiJson<AiCueJson>({
-    label: "Cue",
-    model: aiModel(DEFAULT_AI_MODEL),
-    maxOutputTokens: 500,
-    temperature: 0.05,
-    system: [
-      "You are CueFlow's high-precision automatic cue generator for live conversations.",
-      "Create one useful cue for the latest transcript window.",
-      "Prefer category response for a direct question or request.",
-      "Use category concept for a useful knowledge point, suggestion for a concrete next step or trade-off, person for explicit people/role details, and none only for noise or weak context.",
-      "Use selected prenote as background only when directly relevant. Do not invent facts outside the transcript.",
-      'Return exactly one JSON object: { "category": "response|concept|suggestion|person|none", "confidence": 0.0, "title": "...", "output": "...", "reason": "..." }',
-    ].join("\n"),
-    prompt,
-  });
+  const raw = await requestAiEndpoint<AiCueJson>("cue", payload);
   return normalizeAiCue(raw);
 }
 
@@ -681,18 +546,7 @@ async function requestAiSummary(record: ConversationRecord, language: SpeechLang
 
   const prompt = buildSummaryPrompt(record, language);
   const payload = { prompt, record, language };
-  const endpointResult = await requestAiEndpoint<AiSummaryJson>("summary", payload);
-  const raw = endpointResult ?? await requestOpenAiJson<AiSummaryJson>({
-    label: "Summary",
-    model: aiModel(DEFAULT_SUMMARY_MODEL),
-    maxOutputTokens: 1200,
-    temperature: null,
-    system: [
-      "You create CueFlow conversation summaries.",
-      "Ground summaries in transcript facts. Use prepared notes only as background context.",
-    ].join("\n"),
-    prompt,
-  });
+  const raw = await requestAiEndpoint<AiSummaryJson>("summary", payload);
   return normalizeAiSummary(raw, record.title);
 }
 
@@ -726,7 +580,6 @@ export default function App() {
   const [records, setRecords] = useState<ConversationRecord[]>(SAMPLE_RECORDS);
   const [prenotes, setPrenotes] = useState<Prenote[]>(SAMPLE_PRENOTES);
   const [prenoteDraft, setPrenoteDraft] = useState<PrenoteDraft>({ title: "", text: "" });
-  const [openAiKeyDraft, setOpenAiKeyDraft] = useState(() => storedOpenAiKey());
   const [cues, setCues] = useState<AiCue[]>([]);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [activeRecordId, setActiveRecordId] = useState<string>("");
@@ -1032,11 +885,6 @@ export default function App() {
     };
     setAuthUser(nextUser);
     persistUser(nextUser);
-  }
-
-  function saveOpenAiKey() {
-    persistOpenAiKey(openAiKeyDraft);
-    setConnectionStatus(openAiKeyDraft.trim() ? "ai key saved" : "ai key removed");
   }
 
   function signOut() {
@@ -1394,20 +1242,14 @@ export default function App() {
         <section className="settings-section">
           <h2>AI Provider</h2>
           <div className="setting-card ai-provider-card">
-            <label className="setting-input-row">
-              <span>OpenAI API key</span>
-              <input
-                type="password"
-                autoComplete="off"
-                value={openAiKeyDraft}
-                placeholder={configuredAiEndpoint() ? "Backend endpoint configured" : "sk-..."}
-                onChange={(event) => setOpenAiKeyDraft(event.target.value)}
-              />
-            </label>
-            <button className="setting-row" type="button" onClick={saveOpenAiKey}>
-              <span>Save AI key</span>
-              <span>{configuredAiEndpoint() ? "Endpoint" : openAiKeyDraft.trim() || configuredOpenAiKey() ? "Ready" : "Missing"} <ChevronRight size={25} /></span>
-            </button>
+            <div className="setting-row">
+              <span>OpenAI key</span>
+              <span>Lambda <Check size={22} strokeWidth={1.8} /></span>
+            </div>
+            <div className="setting-row">
+              <span>AI endpoint</span>
+              <span>{configuredAiEndpoint()}</span>
+            </div>
           </div>
         </section>
       </main>

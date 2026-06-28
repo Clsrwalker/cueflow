@@ -145,6 +145,7 @@ class FrontendHostingStack extends cdk.Stack {
   readonly distribution?: cloudfront.Distribution;
   readonly httpsApi?: apigwv2.HttpApi;
   readonly assetServer?: lambda.Function;
+  readonly aiProxy?: lambda.Function;
 
   constructor(scope: Construct, id: string, props: FrontendHostingStackProps) {
     super(scope, id, props);
@@ -264,16 +265,236 @@ function contentType(key) {
 `),
       });
 
+      const aiProxyPhysicalName = `cueflow-ai-proxy-${props.stage}`;
+      const aiProxyLogGroup = new logs.LogGroup(this, "AiProxyLogGroup", {
+        logGroupName: `/aws/lambda/${aiProxyPhysicalName}`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+
+      this.aiProxy = new lambda.Function(this, "AiProxy", {
+        functionName: aiProxyPhysicalName,
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: "index.handler",
+        memorySize: 256,
+        timeout: cdk.Duration.seconds(30),
+        logGroup: aiProxyLogGroup,
+        role: lambdaRole,
+        environment: {
+          OPENAI_API_KEY: "",
+          OPENAI_MODEL: process.env.OPENAI_MODEL ?? "gpt-5.4-nano",
+          OPENAI_SUMMARY_MODEL: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-5.5",
+        },
+        code: lambda.Code.fromInline(`
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+
+const JSON_HEADERS = {
+  "content-type": "application/json",
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "content-type",
+  "access-control-allow-methods": "POST,OPTIONS",
+};
+
+const CUE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["category", "confidence", "title", "output", "reason"],
+  properties: {
+    category: { type: "string", enum: ["response", "concept", "suggestion", "person", "none"] },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    title: { type: "string" },
+    output: { type: "string" },
+    reason: { type: "string" },
+  },
+};
+
+const SUMMARY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "overview", "keyPoints", "actionItems"],
+  properties: {
+    title: { type: "string" },
+    overview: { type: "string" },
+    keyPoints: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "details"],
+        properties: {
+          title: { type: "string" },
+          details: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+    actionItems: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["text"],
+        properties: {
+          text: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+exports.handler = async (event) => {
+  const method = event.requestContext?.http?.method || event.httpMethod || "POST";
+  if (method === "OPTIONS") {
+    return json(204, {});
+  }
+  if (method !== "POST") {
+    return json(405, { error: { code: "METHOD_NOT_ALLOWED", message: "Use POST." } });
+  }
+
+  const path = event.rawPath || event.path || "";
+  const task = path.endsWith("/summary") ? "summary" : path.endsWith("/cue") ? "cue" : "";
+  if (!task) {
+    return json(404, { error: { code: "ROUTE_NOT_FOUND", message: "Unknown AI proxy route." } });
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return json(500, { error: { code: "AI_NOT_CONFIGURED", message: "OpenAI API key is not configured on Lambda." } });
+  }
+
+  let body;
+  try {
+    const rawBody = event.isBase64Encoded ? Buffer.from(event.body || "", "base64").toString("utf8") : event.body || "{}";
+    body = JSON.parse(rawBody);
+  } catch {
+    return json(400, { error: { code: "INVALID_JSON", message: "Request body must be valid JSON." } });
+  }
+
+  const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
+  if (!prompt) {
+    return json(400, { error: { code: "PROMPT_REQUIRED", message: "prompt is required." } });
+  }
+
+  try {
+    const result = await generateJson(task, prompt, apiKey);
+    return json(200, task === "summary" ? { summary: result } : { cue: result });
+  } catch (error) {
+    console.error(JSON.stringify({
+      eventName: "cueflow.ai_proxy_failed",
+      task,
+      message: error instanceof Error ? error.message : String(error),
+    }));
+    return json(502, { error: { code: "OPENAI_REQUEST_FAILED", message: "AI generation failed." } });
+  }
+};
+
+async function generateJson(task, prompt, apiKey) {
+  const isSummary = task === "summary";
+  const system = isSummary
+    ? [
+        "You create CueFlow conversation summaries.",
+        "Ground summaries in transcript facts. Use prepared notes only as background context.",
+        "Return valid JSON only. Do not include markdown, explanation, or extra text.",
+      ].join("\\n")
+    : [
+        "You are CueFlow's high-precision automatic cue generator for live conversations.",
+        "Create one useful cue for the latest transcript window.",
+        "Prefer category response for a direct question or request.",
+        "Use category concept for a useful knowledge point, suggestion for a concrete next step or trade-off, person for explicit people or role details, and none only for noise or weak context.",
+        "Use selected prenote as background only when directly relevant. Do not invent facts outside the transcript.",
+        "Return valid JSON only. Do not include markdown, explanation, or extra text.",
+      ].join("\\n");
+
+  const requestBody = {
+    model: isSummary
+      ? process.env.OPENAI_SUMMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5.5"
+      : process.env.OPENAI_MODEL || "gpt-5.4-nano",
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: system + "\\n\\n" + prompt,
+          },
+        ],
+      },
+    ],
+    max_output_tokens: isSummary ? 1200 : 500,
+    text: {
+      format: {
+        type: "json_schema",
+        name: isSummary ? "cueflow_summary" : "cueflow_cue",
+        strict: true,
+        schema: isSummary ? SUMMARY_SCHEMA : CUE_SCHEMA,
+      },
+    },
+  };
+  if (!isSummary) {
+    requestBody.temperature = 0.05;
+  }
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer " + apiKey,
+    },
+    body: JSON.stringify(requestBody),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error("OpenAI request failed: " + response.status + " " + text.slice(0, 500));
+  }
+  const data = await response.json();
+  const output = extractResponseText(data);
+  return JSON.parse(extractJsonObject(output));
+}
+
+function extractResponseText(data) {
+  if (typeof data.output_text === "string") return data.output_text.trim();
+  const texts = [];
+  for (const item of data.output || []) {
+    for (const contentItem of item.content || []) {
+      if (typeof contentItem.text === "string") texts.push(contentItem.text);
+    }
+  }
+  return texts.join("\\n").trim();
+}
+
+function extractJsonObject(text) {
+  const fence = String.fromCharCode(96, 96, 96);
+  const cleaned = String(text || "")
+    .replace(new RegExp(fence + "json\\\\n?", "gi"), "")
+    .replace(new RegExp(fence + "\\\\n?", "g"), "")
+    .trim();
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  return firstBrace >= 0 && lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
+}
+
+function json(statusCode, payload) {
+  return {
+    statusCode,
+    headers: JSON_HEADERS,
+    body: statusCode === 204 ? "" : JSON.stringify(payload),
+  };
+}
+`),
+      });
+
       if (!lambdaRole) {
         this.frontendBucket.grantRead(this.assetServer);
       }
 
       const frontendIntegration = new integrations.HttpLambdaIntegration("FrontendAssetIntegration", this.assetServer);
+      const aiProxyIntegration = new integrations.HttpLambdaIntegration("AiProxyIntegration", this.aiProxy);
       this.httpsApi = new apigwv2.HttpApi(this, "FrontendHttpsApi", {
         apiName: `cueflow-frontend-${props.stage}`,
       });
       this.httpsApi.addRoutes({ path: "/", methods: [apigwv2.HttpMethod.GET], integration: frontendIntegration });
       this.httpsApi.addRoutes({ path: "/{proxy+}", methods: [apigwv2.HttpMethod.GET], integration: frontendIntegration });
+      this.httpsApi.addRoutes({ path: "/ai/cue", methods: [apigwv2.HttpMethod.POST], integration: aiProxyIntegration });
+      this.httpsApi.addRoutes({ path: "/ai/summary", methods: [apigwv2.HttpMethod.POST], integration: aiProxyIntegration });
     }
 
     new cdk.CfnOutput(this, "FrontendBucketName", { value: this.frontendBucket.bucketName });
