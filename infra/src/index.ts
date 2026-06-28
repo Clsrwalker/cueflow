@@ -10,6 +10,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 
 const app = new cdk.App();
@@ -22,6 +23,8 @@ const frontendMode = (app.node.tryGetContext("frontendMode") ?? "cloudfront") as
 if (!["cloudfront", "s3-website", "api-static"].includes(frontendMode)) {
   throw new Error(`Unsupported frontendMode: ${frontendMode}`);
 }
+const openAiSecretId =
+  (app.node.tryGetContext("openAiSecretId") as string | undefined) ?? process.env.OPENAI_SECRET_ID ?? `cueflow/${stage}/openai-api-key`;
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
   region: process.env.CDK_DEFAULT_REGION ?? "us-east-1",
@@ -37,6 +40,7 @@ type FrontendMode = "cloudfront" | "s3-website" | "api-static";
 type FrontendHostingStackProps = CueFlowStackProps & {
   mode: FrontendMode;
   lambdaRoleArn?: string;
+  openAiSecretId?: string;
 };
 
 class StorageStack extends cdk.Stack {
@@ -266,6 +270,7 @@ function contentType(key) {
       });
 
       const aiProxyPhysicalName = `cueflow-ai-proxy-${props.stage}`;
+      const aiProxyOpenAiSecretId = props.openAiSecretId ?? `cueflow/${props.stage}/openai-api-key`;
       const aiProxyLogGroup = new logs.LogGroup(this, "AiProxyLogGroup", {
         logGroupName: `/aws/lambda/${aiProxyPhysicalName}`,
         retention: logs.RetentionDays.ONE_WEEK,
@@ -281,12 +286,16 @@ function contentType(key) {
         logGroup: aiProxyLogGroup,
         role: lambdaRole,
         environment: {
-          OPENAI_API_KEY: "",
+          OPENAI_SECRET_ID: aiProxyOpenAiSecretId,
           OPENAI_MODEL: process.env.OPENAI_MODEL ?? "gpt-5.4-nano",
           OPENAI_SUMMARY_MODEL: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-5.5",
         },
         code: lambda.Code.fromInline(`
+const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
+
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const secretsManager = new SecretsManagerClient({});
+let cachedOpenAiApiKey = "";
 
 const JSON_HEADERS = {
   "content-type": "application/json",
@@ -356,7 +365,17 @@ exports.handler = async (event) => {
     return json(404, { error: { code: "ROUTE_NOT_FOUND", message: "Unknown AI proxy route." } });
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
+  let apiKey = "";
+  try {
+    apiKey = await getOpenAiApiKey();
+  } catch (error) {
+    console.error(JSON.stringify({
+      eventName: "cueflow.openai_secret_failed",
+      message: error instanceof Error ? error.message : String(error),
+    }));
+    return json(500, { error: { code: "AI_NOT_CONFIGURED", message: "OpenAI API key could not be loaded." } });
+  }
+
   if (!apiKey) {
     return json(500, { error: { code: "AI_NOT_CONFIGURED", message: "OpenAI API key is not configured on Lambda." } });
   }
@@ -386,6 +405,56 @@ exports.handler = async (event) => {
     return json(502, { error: { code: "OPENAI_REQUEST_FAILED", message: "AI generation failed." } });
   }
 };
+
+async function getOpenAiApiKey() {
+  if (cachedOpenAiApiKey) {
+    return cachedOpenAiApiKey;
+  }
+
+  const directApiKey = typeof process.env.OPENAI_API_KEY === "string" ? process.env.OPENAI_API_KEY.trim() : "";
+  if (directApiKey) {
+    cachedOpenAiApiKey = directApiKey;
+    return cachedOpenAiApiKey;
+  }
+
+  const secretId = typeof process.env.OPENAI_SECRET_ID === "string" ? process.env.OPENAI_SECRET_ID.trim() : "";
+  if (!secretId) {
+    return "";
+  }
+
+  const response = await secretsManager.send(new GetSecretValueCommand({ SecretId: secretId }));
+  const secretText =
+    typeof response.SecretString === "string"
+      ? response.SecretString
+      : response.SecretBinary
+        ? Buffer.from(response.SecretBinary).toString("utf8")
+        : "";
+  cachedOpenAiApiKey = extractOpenAiApiKey(secretText);
+  return cachedOpenAiApiKey;
+}
+
+function extractOpenAiApiKey(secretText) {
+  const raw = String(secretText || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === "string") {
+      return parsed.trim();
+    }
+    for (const field of ["OPENAI_API_KEY", "openaiApiKey", "openai_api_key", "apiKey", "key"]) {
+      if (typeof parsed?.[field] === "string" && parsed[field].trim()) {
+        return parsed[field].trim();
+      }
+    }
+  } catch {
+    // Plain-text secrets are supported.
+  }
+
+  return raw;
+}
 
 async function generateJson(task, prompt, apiKey) {
   const isSummary = task === "summary";
@@ -484,6 +553,10 @@ function json(statusCode, payload) {
 
       if (!lambdaRole) {
         this.frontendBucket.grantRead(this.assetServer);
+        const openAiSecret = aiProxyOpenAiSecretId.startsWith("arn:")
+          ? secretsmanager.Secret.fromSecretCompleteArn(this, "OpenAiSecret", aiProxyOpenAiSecretId)
+          : secretsmanager.Secret.fromSecretNameV2(this, "OpenAiSecret", aiProxyOpenAiSecretId);
+        openAiSecret.grantRead(this.aiProxy);
       }
 
       const frontendIntegration = new integrations.HttpLambdaIntegration("FrontendAssetIntegration", this.assetServer);
@@ -745,6 +818,7 @@ if (!skipFrontend) {
     ...stackProps,
     mode: frontendMode,
     lambdaRoleArn: labRoleArn,
+    openAiSecretId,
   });
 }
 const api = new ApiStack(app, `CueFlowApi-${stage}`, {
