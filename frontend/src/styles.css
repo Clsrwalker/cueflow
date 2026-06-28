@@ -715,14 +715,6 @@ pre {
   font-size: 16px;
 }
 
-.ai-provider-card .setting-row {
-  border-top: 1px solid #eeeeed;
-}
-
-.ai-provider-card .setting-row:first-child {
-  border-top: 0;
-}
-
 .setting-row span:last-child {
   display: inline-flex;
   align-items: center;

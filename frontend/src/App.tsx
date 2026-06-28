@@ -1239,19 +1239,6 @@ export default function App() {
             </button>
           </div>
         </section>
-        <section className="settings-section">
-          <h2>AI Provider</h2>
-          <div className="setting-card ai-provider-card">
-            <div className="setting-row">
-              <span>OpenAI key</span>
-              <span>Lambda <Check size={22} strokeWidth={1.8} /></span>
-            </div>
-            <div className="setting-row">
-              <span>AI endpoint</span>
-              <span>{configuredAiEndpoint()}</span>
-            </div>
-          </div>
-        </section>
       </main>
     );
   }
