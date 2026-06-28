@@ -758,7 +758,7 @@ export default function App() {
 
   if (screen === "settings") {
     return (
-      <main className="phone-shell">
+      <main className="phone-shell settings-page">
         {renderHeader("Settings", <span />, "home")}
         <section className="settings-section">
           <h2>Voice Input</h2>
@@ -851,7 +851,7 @@ export default function App() {
 
   if (screen === "conversationSettings") {
     return (
-      <main className="phone-shell">
+      <main className="phone-shell settings-page">
         {renderHeader("Conversation Settings", <span />, "live")}
         <section className="settings-section">
           <h2>Voice Input</h2>
@@ -909,7 +909,7 @@ export default function App() {
 
   if (screen === "history" && activeRecord) {
     return (
-      <main className="phone-shell">
+      <main className="phone-shell history-page">
         {renderHeader("Conversation", (
           <button className="icon-button" aria-label="More">
             <MoreHorizontal size={33} strokeWidth={1.5} />

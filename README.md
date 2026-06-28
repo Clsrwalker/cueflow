@@ -6,7 +6,7 @@ A user opens a session list, starts a live conversation, speaks through the phon
 
 ## Architecture Summary
 
-- Presentation tier: React + Vite mobile-first web client, hosted on S3 and CloudFront in AWS by default, with an API Gateway HTTPS static frontend fallback for restricted Learner Lab accounts.
+- Presentation tier: React + Vite mobile-first responsive web client, hosted on S3 and CloudFront in AWS by default, with an API Gateway HTTPS static frontend fallback for restricted Learner Lab accounts.
 - API and edge tier: API Gateway HTTP API for REST and API Gateway WebSocket API for real-time traffic.
 - Application tier: Lambda REST/WebSocket handlers, SQS-backed cue and summary workers, and AI provider abstraction.
 - Data tier: DynamoDB single-table metadata plus S3 transcript and summary objects.
