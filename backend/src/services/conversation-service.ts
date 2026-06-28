@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Conversation, ConversationSummary, Cue, CueType, TranscriptChunk } from "@cueflow/shared";
 import type { AiProvider, SummaryProviderResult } from "../ai/types.js";
-import { MockAiProvider } from "../ai/mock-ai-provider.js";
+import { createAiProviderFromEnv } from "../ai/provider-factory.js";
 import type { CueFlowStore } from "../storage/types.js";
 
 export const DEFAULT_USER_ID = "demo-user";
@@ -129,7 +129,7 @@ export class ConversationService {
   ) {
     this.clock = options.clock ?? (() => new Date());
     this.idFactory = options.idFactory ?? defaultIdFactory;
-    this.aiProvider = options.aiProvider ?? new MockAiProvider();
+    this.aiProvider = options.aiProvider ?? createAiProviderFromEnv();
   }
 
   async createConversation(input: CreateConversationInput = {}): Promise<Conversation> {

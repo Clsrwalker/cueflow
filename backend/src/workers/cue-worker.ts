@@ -1,7 +1,7 @@
 import type { Cue, TranscriptChunk } from "@cueflow/shared";
 import { validateCueResult } from "@cueflow/shared";
-import { MockAiProvider } from "../ai/mock-ai-provider.js";
 import type { AiProvider } from "../ai/types.js";
+import { createAiProviderFromEnv } from "../ai/provider-factory.js";
 import type { CueJobQueue, StoredCueJob } from "../queues/types.js";
 import type { CueFlowStore } from "../storage/types.js";
 import type { WebSocketMessenger } from "../websocket/messenger.js";
@@ -57,7 +57,7 @@ export class CueWorker {
     private readonly messenger: WebSocketMessenger,
     options: CueWorkerOptions = {},
   ) {
-    this.aiProvider = options.aiProvider ?? new MockAiProvider();
+    this.aiProvider = options.aiProvider ?? createAiProviderFromEnv();
     this.clock = options.clock ?? (() => new Date());
     this.idFactory = options.idFactory ?? defaultIdFactory;
     this.contextWindowSize = options.contextWindowSize ?? 5;

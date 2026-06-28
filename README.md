@@ -66,6 +66,9 @@ Frontend optional:
 
 Backend and infrastructure:
 - `CUEFLOW_STAGE`: deployment stage, for example `dev`.
+- `CUEFLOW_AI_PROVIDER`: `mock` or `openai`. If omitted, CueFlow uses OpenAI when `OPENAI_API_KEY` is present and mock AI otherwise.
+- `OPENAI_API_KEY`: OpenAI API key for the optional OpenAI provider. Never commit this value.
+- `OPENAI_MODEL`: OpenAI model for cue and summary generation. Defaults to `gpt-5.4-mini`.
 - `CUEFLOW_TABLE_NAME`: DynamoDB table name.
 - `CUEFLOW_DATA_BUCKET_NAME`: S3 data bucket name.
 - `CUEFLOW_CUE_QUEUE_URL`: SQS cue queue URL.
@@ -76,6 +79,15 @@ GitHub Actions optional deploy:
 - `AWS_REGION`: GitHub variable, defaults to `us-east-1`.
 
 Do not commit AWS credentials. Use local AWS CLI profile configuration for manual deploys.
+
+To use OpenAI locally:
+
+```bash
+copy .env.example .env
+# edit .env and set OPENAI_API_KEY
+```
+
+The current frontend demo runs in-browser with local mock behavior. The backend provider is ready for REST/WebSocket worker runtimes that instantiate `createAiProviderFromEnv()`.
 
 ## Deployment
 
@@ -168,7 +180,7 @@ On `main`, deploy runs only when `AWS_ROLE_ARN` is configured.
 ## Future Work
 
 - Add a Lambda bundling pipeline for compiled backend handlers.
-- Add an optional Bedrock or OpenAI-compatible provider behind the existing AI interface.
+- Add deployed runtime wiring that packages backend handlers and uses the OpenAI provider in Lambda.
 - Add user authentication and per-user authorization.
 - Add deployed frontend environment configuration for REST and WebSocket URLs.
 - Add cloud integration tests for a stable AWS account.

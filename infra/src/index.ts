@@ -189,6 +189,8 @@ class ApiStack extends cdk.Stack {
       CUEFLOW_DATA_BUCKET_NAME: props.dataBucket.bucketName,
       CUEFLOW_CUE_QUEUE_URL: props.cueQueue.queueUrl,
       CUEFLOW_SUMMARY_QUEUE_URL: props.summaryQueue.queueUrl,
+      CUEFLOW_AI_PROVIDER: process.env.CUEFLOW_AI_PROVIDER ?? "mock",
+      OPENAI_MODEL: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
       NODE_OPTIONS: "--enable-source-maps",
     };
 

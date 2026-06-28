@@ -18,7 +18,7 @@ Application tier:
 - Lambda REST handler for create/list/get/end/summary operations.
 - Lambda WebSocket handler for connect, disconnect, sendTranscript, ping, and clientAckCue routes.
 - SQS-backed cue worker and summary worker.
-- AI provider abstraction with deterministic mock implementation for the course demo.
+- AI provider abstraction with deterministic mock implementation for the course demo and optional OpenAI API provider for real model-backed cue and summary generation.
 
 Data tier:
 - DynamoDB single-table metadata model for conversations, transcript chunk metadata, cues, and WebSocket connection state.

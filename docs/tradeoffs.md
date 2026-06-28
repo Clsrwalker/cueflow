@@ -40,13 +40,13 @@ Why: full transcripts can grow and are cheaper to keep as objects. Metadata rema
 
 Risk: two stores must remain consistent. CueFlow writes chunk metadata and raw objects before AI work.
 
-## Mock AI Provider vs External LLM
+## Mock AI Provider vs OpenAI API
 
-Decision: use deterministic mock AI first.
+Decision: keep deterministic mock AI as the default local demo provider and support an optional OpenAI provider through environment configuration.
 
-Why: the demo runs without external keys and produces stable results for grading.
+Why: the demo runs without external keys and produces stable results for grading, while the backend can use the OpenAI API when `OPENAI_API_KEY` is configured.
 
-Risk: mock output is simpler than a real model. The provider interface keeps a later Bedrock or OpenAI-compatible implementation isolated.
+Risk: OpenAI calls add latency, cost, and key-management requirements. CueFlow keeps provider selection isolated behind the AI interface.
 
 ## Serverless Cost Optimization vs Runtime Control
 

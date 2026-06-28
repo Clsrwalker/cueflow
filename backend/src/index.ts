@@ -43,6 +43,18 @@ export {
 } from "./ai/mock-ai-provider.js";
 
 export {
+  DEFAULT_OPENAI_MODEL,
+  OpenAiProvider,
+  type OpenAiProviderOptions,
+} from "./ai/openai-provider.js";
+
+export {
+  aiProviderNameFromEnv,
+  createAiProviderFromEnv,
+  type AiProviderName,
+} from "./ai/provider-factory.js";
+
+export {
   DEFAULT_USER_ID,
   ConversationClosedError,
   ConversationNotFoundError,
