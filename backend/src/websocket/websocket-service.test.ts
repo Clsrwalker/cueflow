@@ -32,6 +32,7 @@ describe("WebSocketService", () => {
     const connection = await websockets.connect({
       connectionId: "conn_001",
       conversationId: conversation.conversationId,
+      userId: "user_a",
     });
 
     expect(connection).toMatchObject({
@@ -48,7 +49,7 @@ describe("WebSocketService", () => {
   test("persists transcript chunks, sends ack events, and skips low-signal cue jobs", async () => {
     const { conversations, store, queue, messenger, websockets } = setup();
     const conversation = await conversations.createConversation();
-    await websockets.connect({ connectionId: "conn_001", conversationId: conversation.conversationId });
+    await websockets.connect({ connectionId: "conn_001", conversationId: conversation.conversationId, userId: "demo-user" });
 
     const result = await websockets.sendTranscript("conn_001", {
       action: "sendTranscript",
@@ -78,7 +79,7 @@ describe("WebSocketService", () => {
   test("enqueues one async cue job when trigger policy fires", async () => {
     const { conversations, queue, websockets } = setup();
     const conversation = await conversations.createConversation();
-    await websockets.connect({ connectionId: "conn_001", conversationId: conversation.conversationId });
+    await websockets.connect({ connectionId: "conn_001", conversationId: conversation.conversationId, userId: "demo-user" });
 
     const first = await websockets.sendTranscript("conn_001", {
       action: "sendTranscript",
@@ -109,11 +110,32 @@ describe("WebSocketService", () => {
     expect(queue.listJobsForTest()).toHaveLength(1);
   });
 
+  test("persists transcript but does not enqueue cloud cues when autoCue is disabled", async () => {
+    const { conversations, queue, store, websockets } = setup();
+    const conversation = await conversations.createConversation();
+    await websockets.connect({ connectionId: "conn_001", conversationId: conversation.conversationId, userId: "demo-user" });
+
+    const result = await websockets.sendTranscript("conn_001", {
+      action: "sendTranscript",
+      conversationId: conversation.conversationId,
+      chunkId: "000001",
+      speaker: "speaker_1",
+      text: "Should we use WebSocket push or REST polling for live cue delivery?",
+      clientTimestamp: "2026-06-16T10:00:04.000Z",
+      autoCue: false,
+    });
+
+    expect(result.cueJob).toBeNull();
+    expect(result.evaluation.suppressionReason).toBe("AUTO_CUE_OFF");
+    await expect(store.listTranscriptChunks(conversation.conversationId)).resolves.toHaveLength(1);
+    expect(queue.listJobsForTest()).toHaveLength(0);
+  });
+
   test("rejects transcript messages for the wrong active conversation", async () => {
     const { conversations, websockets } = setup();
     const first = await conversations.createConversation();
     const second = await conversations.createConversation();
-    await websockets.connect({ connectionId: "conn_001", conversationId: first.conversationId });
+    await websockets.connect({ connectionId: "conn_001", conversationId: first.conversationId, userId: "demo-user" });
 
     await expect(websockets.sendTranscript("conn_001", {
       action: "sendTranscript",
@@ -128,7 +150,7 @@ describe("WebSocketService", () => {
   test("sends pong events and accepts cue acknowledgements", async () => {
     const { conversations, messenger, websockets } = setup();
     const conversation = await conversations.createConversation();
-    await websockets.connect({ connectionId: "conn_001", conversationId: conversation.conversationId });
+    await websockets.connect({ connectionId: "conn_001", conversationId: conversation.conversationId, userId: "demo-user" });
 
     const pong = await websockets.ping("conn_001");
     const ack = await websockets.clientAckCue("conn_001", {
@@ -148,5 +170,16 @@ describe("WebSocketService", () => {
         event: pong,
       },
     ]);
+  });
+
+  test("rejects WebSocket connections for the wrong user", async () => {
+    const { conversations, websockets } = setup();
+    const conversation = await conversations.createConversation({ userId: "user_a" });
+
+    await expect(websockets.connect({
+      connectionId: "conn_001",
+      conversationId: conversation.conversationId,
+      userId: "user_b",
+    })).rejects.toBeInstanceOf(WebSocketValidationError);
   });
 });

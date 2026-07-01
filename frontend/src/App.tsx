@@ -4,6 +4,7 @@ import {
   BookOpen,
   Check,
   ChevronRight,
+  ClipboardCheck,
   Lightbulb,
   LockKeyhole,
   LogIn,
@@ -14,15 +15,27 @@ import {
   Plus,
   Settings2,
   ShieldCheck,
+  TriangleAlert,
   Trash2,
   UserPlus,
   UserRound,
   X,
 } from "lucide-react";
+import type {
+  Conversation as CloudConversation,
+  ConversationSummary as CloudConversationSummary,
+  Cue as CloudCue,
+  CueCreatedEvent,
+  SummaryReadyEvent,
+  TranscriptAckEvent,
+  TranscriptChunk as CloudTranscriptChunk,
+  WebSocketSendTranscriptMessage,
+} from "@cueflow/shared";
 
 type Screen = "home" | "settings" | "prenoteManager" | "prenoteDetail" | "live" | "history" | "conversationSettings";
 type ConversationPage = "workspace" | "prenote";
-type CueCategory = "response" | "concept" | "suggestion" | "person";
+type CueCategory = "concept" | "decision" | "risk" | "action" | "summary";
+type LegacyCueCategory = "response" | "suggestion" | "person";
 type SummaryStatus = "not_started" | "queued" | "running" | "ready" | "failed";
 type SpeechLanguage = "english" | "chinese" | "auto";
 
@@ -30,7 +43,12 @@ type AiCue = {
   id: string;
   category: CueCategory;
   title: string;
+  shortText: string;
+  detailText: string;
   output: string;
+  confidence?: number;
+  sourceChunkStart?: string;
+  sourceChunkEnd?: string;
   createdAt: string;
   source: "manual" | "auto";
 };
@@ -99,7 +117,7 @@ type ConversationSettings = {
 };
 
 type AiCueJson = {
-  category?: CueCategory | "none";
+  category?: CueCategory | LegacyCueCategory | "none";
   confidence?: number;
   title?: string;
   output?: string;
@@ -118,6 +136,13 @@ type AiSummaryJson = {
   }> | string[];
 };
 
+type TranscriptionApiJson = {
+  transcript?: string;
+  text?: string;
+  model?: string;
+  language?: SpeechLanguage;
+};
+
 type PrenoteApiJson = {
   id?: string;
   title?: string;
@@ -125,6 +150,18 @@ type PrenoteApiJson = {
   selected?: boolean;
   createdAt?: string;
   updatedAt?: string;
+};
+
+type RuntimeConfig = {
+  apiBase: string;
+  webSocketUrl: string;
+};
+
+type ActiveConversationSnapshot = {
+  conversationId: string;
+  userId: string;
+  startedAt: string;
+  title: string;
 };
 
 type AuthUser = {
@@ -176,9 +213,18 @@ type SpeechRecognitionLike = {
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
 const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
-const CUE_CATEGORY_ORDER: CueCategory[] = ["concept", "response", "suggestion", "person"];
+const CUE_CATEGORY_ORDER: CueCategory[] = ["decision", "risk", "action", "concept", "summary"];
 const AUTH_STORAGE_KEY = "cueflow.authUser";
+const ACTIVE_CONVERSATION_STORAGE_KEY = "cueflow.activeConversation";
+const CLOUD_STT_SEGMENT_MS = 3200;
+const MIN_AUDIO_BLOB_BYTES = 1200;
+const TRANSCRIPT_DUPLICATE_LOOKBACK = 4;
+const CUE_TITLE_MAX_CHARS = 34;
+const CUE_TITLE_MAX_WORDS = 5;
+const CUE_SHORT_MAX_CHARS = 190;
+const CUE_DETAIL_MAX_CHARS = 700;
 const DEFAULT_AI_ENDPOINT = "/ai";
+const DEFAULT_API_ENDPOINT = "";
 const DEFAULT_DATA_ENDPOINT = "";
 
 const DEFAULT_SETTINGS: ConversationSettings = {
@@ -241,15 +287,25 @@ const SAMPLE_RECORDS: ConversationRecord[] = [
         id: "cue-1",
         category: "concept",
         title: "Async cue pipeline",
+        shortText: "Persist transcript chunks first, then enqueue context windows for AI cue generation.",
+        detailText: "Persist transcript chunks first, then enqueue context windows for AI cue generation.",
         output: "Persist transcript chunks first, then enqueue context windows for AI cue generation.",
+        confidence: 0.86,
+        sourceChunkStart: "tr-1",
+        sourceChunkEnd: "tr-3",
         createdAt: new Date().toISOString(),
         source: "auto",
       },
       {
         id: "cue-2",
-        category: "suggestion",
+        category: "action",
         title: "Demo talking point",
+        shortText: "Show the live workspace with AI summary and transcript visible at the same time.",
+        detailText: "Show the live workspace with AI summary and transcript visible at the same time.",
         output: "Show the live workspace with AI summary and transcript visible at the same time.",
+        confidence: 0.82,
+        sourceChunkStart: "tr-2",
+        sourceChunkEnd: "tr-2",
         createdAt: new Date().toISOString(),
         source: "auto",
       },
@@ -308,6 +364,30 @@ function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null 
   return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition ?? null;
 }
 
+function canonicalTranscriptText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isNearDuplicateTranscript(text: string, lines: TranscriptLine[]): boolean {
+  const next = canonicalTranscriptText(text);
+  if (!next) return true;
+  return lines
+    .filter((line) => !line.partial)
+    .slice(-TRANSCRIPT_DUPLICATE_LOOKBACK)
+    .some((line) => {
+      const existing = canonicalTranscriptText(line.text);
+      if (!existing) return false;
+      if (existing === next) return true;
+      const shorter = existing.length < next.length ? existing : next;
+      const longer = existing.length < next.length ? next : existing;
+      return longer.startsWith(shorter) && shorter.length / Math.max(longer.length, 1) >= 0.86;
+    });
+}
+
 function selectedPrenote(prenotes: Prenote[]): Prenote | null {
   const selected = prenotes.filter((note) => note.selected);
   if (!selected.length) return null;
@@ -343,17 +423,63 @@ function elapsedLabel(seconds: number): string {
 }
 
 function cueIcon(category: CueCategory) {
-  if (category === "concept") return <BookOpen size={22} strokeWidth={1.7} />;
-  if (category === "response") return <span className="question-icon">?</span>;
-  if (category === "suggestion") return <Lightbulb size={22} strokeWidth={1.7} />;
-  return <UserRound size={22} strokeWidth={1.7} />;
+  if (category === "decision") return <Check size={21} strokeWidth={2} />;
+  if (category === "risk") return <TriangleAlert size={21} strokeWidth={1.8} />;
+  if (category === "action") return <ClipboardCheck size={21} strokeWidth={1.8} />;
+  if (category === "summary") return <Lightbulb size={21} strokeWidth={1.8} />;
+  return <BookOpen size={21} strokeWidth={1.7} />;
 }
 
 function cueLabel(category: CueCategory): string {
   if (category === "concept") return "Concept";
-  if (category === "response") return "Response";
-  if (category === "suggestion") return "Suggestion";
-  return "People";
+  if (category === "decision") return "Decision";
+  if (category === "risk") return "Risk";
+  if (category === "action") return "Action";
+  return "Summary";
+}
+
+function cueCategoryFromCloudType(type: CloudCue["type"] | undefined): CueCategory {
+  if (type === "DECISION") return "decision";
+  if (type === "RISK") return "risk";
+  if (type === "ACTION") return "action";
+  if (type === "SUMMARY") return "summary";
+  return "concept";
+}
+
+function normalizeCueCategory(category: AiCueJson["category"]): CueCategory | null {
+  const normalized = String(category || "").trim().toLowerCase();
+  if (!normalized || normalized === "none") return null;
+  if (normalized === "decision" || normalized === "response") return "decision";
+  if (normalized === "risk") return "risk";
+  if (normalized === "action" || normalized === "suggestion") return "action";
+  if (normalized === "summary") return "summary";
+  if (normalized === "concept" || normalized === "person") return "concept";
+  return null;
+}
+
+function formatCueConfidence(confidence: number | undefined): string | null {
+  if (typeof confidence !== "number" || !Number.isFinite(confidence)) return null;
+  return `${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%`;
+}
+
+function cueSourceLabel(cue: Pick<AiCue, "sourceChunkStart" | "sourceChunkEnd">): string | null {
+  if (!cue.sourceChunkStart && !cue.sourceChunkEnd) return null;
+  if (cue.sourceChunkStart && cue.sourceChunkStart === cue.sourceChunkEnd) return `Chunk ${cue.sourceChunkStart}`;
+  return `Chunks ${cue.sourceChunkStart || "?"}-${cue.sourceChunkEnd || "?"}`;
+}
+
+function cueTimeLabel(createdAt: string): string | null {
+  const created = dateFromIso(createdAt);
+  if (!created) return null;
+  return formatClock(created);
+}
+
+function cueMetaItems(cue: AiCue): string[] {
+  return [
+    formatCueConfidence(cue.confidence),
+    cueSourceLabel(cue),
+    cueTimeLabel(cue.createdAt),
+  ].filter((item): item is string => Boolean(item));
 }
 
 function shouldAutoFollowTranscriptScroll(params: {
@@ -368,10 +494,11 @@ function shouldAutoFollowTranscriptScroll(params: {
 
 function groupCuesByCategory(cues: AiCue[]): Record<CueCategory, AiCue[]> {
   return {
+    decision: cues.filter((cue) => cue.category === "decision"),
+    risk: cues.filter((cue) => cue.category === "risk"),
+    action: cues.filter((cue) => cue.category === "action"),
     concept: cues.filter((cue) => cue.category === "concept"),
-    response: cues.filter((cue) => cue.category === "response"),
-    suggestion: cues.filter((cue) => cue.category === "suggestion"),
-    person: cues.filter((cue) => cue.category === "person"),
+    summary: cues.filter((cue) => cue.category === "summary"),
   };
 }
 
@@ -390,12 +517,18 @@ function meaningfulLength(value: string): number {
 function hasQuestionOrRequest(value: string): boolean {
   return /[?？]/.test(value)
     || /\b(what|why|how|should|can|could|would|explain|tell me|help|need|next)\b/i.test(value)
-    || /(什么|为什么|怎么|如何|是否|可以|需要|应该|解释|怎么办|下一步)/.test(value);
+    || /(什么|为什么|怎么|如何|是否|可以|需要|应该|解释|下一步)/.test(value);
 }
 
 function promptContextFromPrenote(prenote: Prenote | null): string {
   if (!prenote) return "";
   return `Prepared context: ${prenote.title}\n${prenote.text}`.trim();
+}
+
+function hasReadableQuestionOrRequest(value: string): boolean {
+  return /[?\uFF1F]/.test(value)
+    || /\b(what|why|how|who|when|where|should|can|could|would|explain|tell me|help|need|next)\b/i.test(value)
+    || /(\u4EC0\u4E48|\u4E3A\u4EC0\u4E48|\u600E\u4E48|\u5982\u4F55|\u662F\u5426|\u53EF\u4EE5|\u9700\u8981|\u5E94\u8BE5|\u89E3\u91CA|\u4E0B\u4E00\u6B65)/.test(value);
 }
 
 function shouldGenerateCue(lines: TranscriptLine[], cues: AiCue[], prenote: Prenote | null): boolean {
@@ -405,7 +538,7 @@ function shouldGenerateCue(lines: TranscriptLine[], cues: AiCue[], prenote: Pren
   const contextText = promptContextFromPrenote(prenote);
   return meaningfulLength(text) >= 12
     || Boolean(prenote && meaningfulLength(text) >= 5)
-    || hasQuestionOrRequest(text)
+    || hasReadableQuestionOrRequest(text)
     || /\b(risk|should|decision|latency|cloud|api|next)\b/i.test(`${contextText}\n${text}`);
 }
 
@@ -413,8 +546,17 @@ function configuredAiEndpoint(): string {
   return import.meta.env.VITE_CUEFLOW_AI_ENDPOINT?.trim() || DEFAULT_AI_ENDPOINT;
 }
 
+function initialRuntimeConfig(): RuntimeConfig {
+  return {
+    apiBase: import.meta.env.VITE_CUEFLOW_API_BASE?.trim() || DEFAULT_API_ENDPOINT,
+    webSocketUrl: import.meta.env.VITE_CUEFLOW_WS_URL?.trim() || "",
+  };
+}
+
 function configuredDataEndpoint(): string {
-  return import.meta.env.VITE_CUEFLOW_DATA_ENDPOINT?.trim() || DEFAULT_DATA_ENDPOINT;
+  return import.meta.env.VITE_CUEFLOW_DATA_ENDPOINT?.trim()
+    || import.meta.env.VITE_CUEFLOW_API_BASE?.trim()
+    || DEFAULT_DATA_ENDPOINT;
 }
 
 function dataUrl(path: string): string {
@@ -422,8 +564,61 @@ function dataUrl(path: string): string {
   return `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+function apiUrl(path: string, runtimeConfig: RuntimeConfig): string {
+  const endpoint = (
+    import.meta.env.VITE_CUEFLOW_API_BASE?.trim()
+    || runtimeConfig.apiBase.trim()
+    || DEFAULT_API_ENDPOINT
+  ).replace(/\/+$/, "");
+  return `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function webSocketUrlForConversation(runtimeConfig: RuntimeConfig, conversationId: string, user: AuthUser): string | null {
+  const endpoint = import.meta.env.VITE_CUEFLOW_WS_URL?.trim() || runtimeConfig.webSocketUrl.trim();
+  if (!endpoint) return null;
+  try {
+    const url = new URL(endpoint);
+    url.searchParams.set("conversationId", conversationId);
+    url.searchParams.set("userId", userIdForApi(user));
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function userIdForApi(user: Pick<AuthUser, "email">): string {
   return user.email.trim().toLowerCase();
+}
+
+function activeConversationStorageKey(user: Pick<AuthUser, "email">): string {
+  return `${ACTIVE_CONVERSATION_STORAGE_KEY}:${userIdForApi(user)}`;
+}
+
+function storedActiveConversation(user: Pick<AuthUser, "email">): ActiveConversationSnapshot | null {
+  try {
+    const raw = window.localStorage.getItem(activeConversationStorageKey(user));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ActiveConversationSnapshot>;
+    if (!parsed.conversationId || parsed.userId !== userIdForApi(user)) return null;
+    return {
+      conversationId: parsed.conversationId,
+      userId: parsed.userId,
+      startedAt: parsed.startedAt || new Date().toISOString(),
+      title: parsed.title || "New conversation",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistActiveConversation(user: Pick<AuthUser, "email">, snapshot: ActiveConversationSnapshot | null) {
+  try {
+    const key = activeConversationStorageKey(user);
+    if (snapshot) window.localStorage.setItem(key, JSON.stringify(snapshot));
+    else window.localStorage.removeItem(key);
+  } catch {
+    // Refresh recovery is best effort.
+  }
 }
 
 function normalizePrenote(value: PrenoteApiJson): Prenote | null {
@@ -460,9 +655,8 @@ async function requestDataEndpoint<T>(
     headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
   });
-  if (!response.ok) throw new Error(`Data endpoint failed (${response.status}).`);
-  if (response.status === 204) return undefined as T;
-  return await response.json() as T;
+  if (!response.ok) throw new Error(await endpointErrorMessage(response, "Prepared notes service"));
+  return await responseJson<T>(response, "Prepared notes service");
 }
 
 async function listPrenotes(user: AuthUser): Promise<Prenote[]> {
@@ -494,6 +688,159 @@ async function deletePrenoteApi(user: AuthUser, id: string): Promise<void> {
   await requestDataEndpoint<void>(`/prenotes/${encodeURIComponent(id)}`, user, { method: "DELETE" });
 }
 
+async function requestConversationApi<T>(
+  path: string,
+  user: AuthUser,
+  runtimeConfig: RuntimeConfig,
+  options: {
+    method?: "GET" | "POST";
+    body?: unknown;
+  } = {},
+): Promise<T> {
+  const headers: Record<string, string> = {
+    "x-cueflow-user-id": userIdForApi(user),
+  };
+  if (options.body !== undefined) {
+    headers["content-type"] = "application/json";
+  }
+  const response = await fetch(apiUrl(path, runtimeConfig), {
+    method: options.method ?? "GET",
+    headers,
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+  });
+  if (!response.ok) {
+    throw new Error(await endpointErrorMessage(response, "Conversation service"));
+  }
+  return await responseJson<T>(response, "Conversation service");
+}
+
+async function createConversationApi(user: AuthUser, runtimeConfig: RuntimeConfig): Promise<CloudConversation> {
+  const data = await requestConversationApi<{ conversation?: CloudConversation }>("/conversations", user, runtimeConfig, {
+    method: "POST",
+    body: {},
+  });
+  if (!data.conversation?.conversationId) throw new Error("Conversation response was invalid.");
+  return data.conversation;
+}
+
+async function getConversationApi(user: AuthUser, runtimeConfig: RuntimeConfig, conversationId: string): Promise<CloudConversation> {
+  const data = await requestConversationApi<{ conversation?: CloudConversation }>(
+    `/conversations/${encodeURIComponent(conversationId)}`,
+    user,
+    runtimeConfig,
+  );
+  if (!data.conversation?.conversationId) throw new Error("Conversation response was invalid.");
+  return data.conversation;
+}
+
+async function listConversationsApi(user: AuthUser, runtimeConfig: RuntimeConfig): Promise<CloudConversation[]> {
+  const data = await requestConversationApi<{ conversations?: CloudConversation[] }>(
+    `/conversations?userId=${encodeURIComponent(userIdForApi(user))}`,
+    user,
+    runtimeConfig,
+  );
+  return data.conversations || [];
+}
+
+async function getTranscriptApi(user: AuthUser, runtimeConfig: RuntimeConfig, conversationId: string): Promise<CloudTranscriptChunk[]> {
+  const data = await requestConversationApi<{ transcript?: CloudTranscriptChunk[] }>(
+    `/conversations/${encodeURIComponent(conversationId)}/transcript`,
+    user,
+    runtimeConfig,
+  );
+  return data.transcript || [];
+}
+
+async function getCuesApi(user: AuthUser, runtimeConfig: RuntimeConfig, conversationId: string): Promise<CloudCue[]> {
+  const data = await requestConversationApi<{ cues?: CloudCue[] }>(
+    `/conversations/${encodeURIComponent(conversationId)}/cues`,
+    user,
+    runtimeConfig,
+  );
+  return data.cues || [];
+}
+
+async function endConversationApi(
+  user: AuthUser,
+  runtimeConfig: RuntimeConfig,
+  conversationId: string,
+  promptContext?: string,
+  usedPrenote?: Prenote | null,
+): Promise<CloudConversation> {
+  const data = await requestConversationApi<{ conversation?: CloudConversation }>(
+    `/conversations/${encodeURIComponent(conversationId)}/end`,
+    user,
+    runtimeConfig,
+    {
+      method: "POST",
+      body: {
+        ...(promptContext ? { promptContext } : {}),
+        ...(usedPrenote ? {
+          usedPrenote: {
+            id: usedPrenote.id,
+            title: usedPrenote.title,
+            text: usedPrenote.text,
+          },
+        } : {}),
+      },
+    },
+  );
+  if (!data.conversation?.conversationId) throw new Error("End conversation response was invalid.");
+  return data.conversation;
+}
+
+async function getSummaryApi(user: AuthUser, runtimeConfig: RuntimeConfig, conversationId: string): Promise<CloudConversationSummary | null> {
+  try {
+    const data = await requestConversationApi<{ summary?: CloudConversationSummary }>(
+      `/conversations/${encodeURIComponent(conversationId)}/summary`,
+      user,
+      runtimeConfig,
+    );
+  return data.summary || null;
+  } catch {
+    return null;
+  }
+}
+
+function browserAudioLanguage(language: SpeechLanguage): string | undefined {
+  if (language === "english") return "english";
+  if (language === "chinese") return "chinese";
+  return "auto";
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Audio chunk could not be read."));
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.split(",")[1] : result);
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function transcribeAudioApi(
+  user: AuthUser,
+  runtimeConfig: RuntimeConfig,
+  blob: Blob,
+  settings: ConversationSettings,
+  prenote: Prenote | null,
+): Promise<string> {
+  const audioBase64 = await blobToBase64(blob);
+  if (!audioBase64) return "";
+  const data = await requestConversationApi<TranscriptionApiJson>("/transcribe", user, runtimeConfig, {
+    method: "POST",
+    body: {
+      audioBase64,
+      mimeType: blob.type || "audio/webm",
+      language: browserAudioLanguage(settings.language),
+      ...(prenote ? { promptContext: `${prenote.title}\n${prenote.text}`.slice(0, 1600) } : {}),
+    },
+  });
+  return cleanParagraph(data.transcript || data.text, 4000);
+}
+
 function transcriptText(lines: TranscriptLine[]): string {
   return lines.map((line) => `[${line.time}] ${line.text}`).join("\n").trim();
 }
@@ -508,6 +855,74 @@ function cleanOneLine(value: unknown, max: number): string {
 
 function cleanParagraph(value: unknown, max: number): string {
   return String(value ?? "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, max);
+}
+
+function fallbackCueTitle(category: CueCategory): string {
+  if (category === "decision") return "Decision point";
+  if (category === "risk") return "Risk";
+  if (category === "action") return "Next step";
+  if (category === "summary") return "Quick recap";
+  return "Key concept";
+}
+
+function isCueTitleTooCloseToText(title: string, text: string): boolean {
+  const titleKey = canonicalTranscriptText(title);
+  const textKey = canonicalTranscriptText(text);
+  if (!titleKey || !textKey) return false;
+  if (titleKey === textKey) return true;
+  if (textKey.startsWith(`${titleKey} `) && titleKey.length >= 18) return true;
+  const shorter = titleKey.length < textKey.length ? titleKey : textKey;
+  const longer = titleKey.length < textKey.length ? textKey : titleKey;
+  return longer.startsWith(shorter) && shorter.length / Math.max(longer.length, 1) >= 0.82;
+}
+
+function compactCueTitle(rawTitle: unknown, category: CueCategory, shortText: string): string {
+  const cleaned = cleanOneLine(rawTitle, 120).replace(/[.!?:;,]+$/g, "");
+  if (!cleaned || isCueTitleTooCloseToText(cleaned, shortText)) {
+    return fallbackCueTitle(category);
+  }
+  const words = cleaned.split(/\s+/).slice(0, CUE_TITLE_MAX_WORDS).join(" ");
+  const clipped = words
+    .slice(0, CUE_TITLE_MAX_CHARS)
+    .replace(/[^\p{Letter}\p{Number}]+$/gu, "")
+    .trim();
+  return clipped || fallbackCueTitle(category);
+}
+
+function removeDuplicatedCueTitleLead(text: string, rawTitle: unknown): string {
+  const cleanedText = text.trim();
+  const cleanedTitle = cleanOneLine(rawTitle, 120).replace(/[.!?:;,]+$/g, "");
+  if (!cleanedText || !cleanedTitle) return cleanedText;
+  if (!cleanedText.toLowerCase().startsWith(cleanedTitle.toLowerCase())) return cleanedText;
+
+  const rest = cleanedText.slice(cleanedTitle.length).replace(/^[\s:;,.!?-]+/, "").trim();
+  return rest.length >= 18 ? rest : cleanedText;
+}
+
+async function endpointErrorMessage(response: Response, label: string): Promise<string> {
+  const contentType = response.headers.get("content-type")?.toLowerCase() || "";
+  if (contentType.includes("application/json")) {
+    try {
+      const data = await response.json() as { error?: { message?: string }; message?: string };
+      return data.error?.message || data.message || `${label} unavailable (${response.status}).`;
+    } catch {
+      return `${label} unavailable (${response.status}).`;
+    }
+  }
+  return `${label} unavailable (${response.status}).`;
+}
+
+async function responseJson<T>(response: Response, label: string): Promise<T> {
+  if (response.status === 204) return undefined as T;
+  const contentType = response.headers.get("content-type")?.toLowerCase() || "";
+  if (!contentType.includes("application/json")) {
+    throw new Error(`${label} unavailable.`);
+  }
+  try {
+    return await response.json() as T;
+  } catch {
+    throw new Error(`${label} returned invalid data.`);
+  }
 }
 
 async function requestAiEndpoint<T>(path: "cue" | "summary", payload: unknown): Promise<T> {
@@ -536,18 +951,25 @@ function buildCuePrompt(lines: TranscriptLine[], prenote: Prenote | null, settin
 }
 
 function normalizeAiCue(value: AiCueJson): AiCue | null {
-  const category = value.category;
-  if (!category || category === "none") return null;
-  if (!CUE_CATEGORY_ORDER.includes(category)) return null;
-  const title = cleanOneLine(value.title, 64);
-  const output = cleanParagraph(value.output, 900);
-  if (!title || !output) return null;
+  const category = normalizeCueCategory(value.category);
+  if (!category) return null;
+  const rawOutput = cleanParagraph(value.output, CUE_DETAIL_MAX_CHARS);
+  const title = compactCueTitle(value.title, category, rawOutput);
+  const detailText = removeDuplicatedCueTitleLead(rawOutput, value.title);
+  const shortText = cleanOneLine(removeDuplicatedCueTitleLead(rawOutput, value.title), CUE_SHORT_MAX_CHARS);
+  if (!title || !detailText || !shortText) return null;
+  const confidence = typeof value.confidence === "number" && Number.isFinite(value.confidence)
+    ? Math.max(0, Math.min(1, value.confidence))
+    : undefined;
 
   return {
     id: `cue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
     category,
     title,
-    output,
+    shortText,
+    detailText,
+    output: detailText,
+    confidence,
     createdAt: new Date().toISOString(),
     source: "auto",
   };
@@ -655,8 +1077,156 @@ function queuedSummary(title: string, status: SummaryStatus = "queued", error?: 
   };
 }
 
+function dateFromIso(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function durationFromConversation(conversation: CloudConversation): string {
+  const started = dateFromIso(conversation.startedAt);
+  const ended = dateFromIso(conversation.endedAt || undefined) ?? (conversation.status === "ACTIVE" ? new Date() : null);
+  if (!started || !ended) return "00:00";
+  return elapsedLabel(Math.max(0, Math.round((ended.getTime() - started.getTime()) / 1000)));
+}
+
+function cloudSummaryStatus(status: CloudConversation["summaryStatus"]): SummaryStatus {
+  if (status === "PENDING") return "running";
+  if (status === "READY") return "ready";
+  if (status === "FAILED") return "failed";
+  return "not_started";
+}
+
+function cloudCueToUi(cue: Partial<CloudCue> & { cueId?: string; type?: CloudCue["type"] }): AiCue | null {
+  const id = cleanOneLine(cue.cueId, 140);
+  const category = cueCategoryFromCloudType(cue.type);
+  const rawShortText = cleanParagraph(cue.shortText, CUE_SHORT_MAX_CHARS);
+  const rawDetailText = cleanParagraph(cue.detailText || cue.shortText, CUE_DETAIL_MAX_CHARS);
+  const title = compactCueTitle(cue.title, category, rawShortText || rawDetailText);
+  const shortText = cleanOneLine(removeDuplicatedCueTitleLead(rawShortText, cue.title), CUE_SHORT_MAX_CHARS);
+  const detailText = cleanParagraph(removeDuplicatedCueTitleLead(rawDetailText, cue.title), CUE_DETAIL_MAX_CHARS);
+  if (!id || !title || !shortText || !detailText) return null;
+  const confidence = typeof cue.confidence === "number" && Number.isFinite(cue.confidence)
+    ? Math.max(0, Math.min(1, cue.confidence))
+    : undefined;
+  return {
+    id,
+    category,
+    title,
+    shortText,
+    detailText,
+    output: detailText,
+    confidence,
+    sourceChunkStart: cleanOneLine(cue.sourceChunkStart, 80) || undefined,
+    sourceChunkEnd: cleanOneLine(cue.sourceChunkEnd, 80) || undefined,
+    createdAt: cleanOneLine(cue.createdAt, 80) || new Date().toISOString(),
+    source: "auto",
+  };
+}
+
+function transcriptLineFromChunk(chunk: CloudTranscriptChunk, conversation: CloudConversation, index: number): TranscriptLine {
+  const started = dateFromIso(conversation.startedAt);
+  const created = dateFromIso(chunk.createdAt);
+  const seconds = started && created
+    ? Math.max(0, Math.round((created.getTime() - started.getTime()) / 1000))
+    : index;
+  return {
+    id: chunk.chunkId,
+    time: elapsedLabel(seconds),
+    text: chunk.text,
+  };
+}
+
+function cloudSummaryToUi(summary: CloudConversationSummary, fallbackTitle: string): ConversationSummary {
+  const keyPoints: ConversationSummaryKeyPoint[] = summary.keyTopics.map((topic, index) => ({
+    id: `kp-${summary.conversationId}-${index}`,
+    title: cleanOneLine(topic, 140),
+    details: [],
+  })).filter((point) => point.title);
+  if (summary.risks.length) {
+    keyPoints.push({
+      id: `kp-${summary.conversationId}-risks`,
+      title: "Risks",
+      details: summary.risks.map((risk) => cleanParagraph(risk, 600)).filter(Boolean),
+    });
+  }
+  return {
+    status: "ready",
+    title: fallbackTitle,
+    overview: cleanParagraph(summary.summary, 2200) || "-",
+    keyPoints,
+    actionItems: summary.actionItems
+      .map((item, index) => ({
+        id: `act-${summary.conversationId}-${index}`,
+        text: cleanOneLine(item, 240),
+        checked: false,
+      }))
+      .filter((item) => item.text),
+    generatedAt: summary.createdAt,
+  };
+}
+
+function titleFromCloudConversation(
+  conversation: CloudConversation,
+  transcript: TranscriptLine[],
+  summary: CloudConversationSummary | null,
+): string {
+  const fromTranscript = cleanOneLine(transcript[0]?.text, 52);
+  if (fromTranscript) return fromTranscript;
+  const fromSummary = cleanOneLine(summary?.summary, 52);
+  if (fromSummary) return fromSummary;
+  const started = dateFromIso(conversation.startedAt);
+  return started ? `Conversation ${formatRecordDate(started)}` : "Conversation";
+}
+
+function usedPrenoteFromCloud(conversation: CloudConversation): Prenote | undefined {
+  const note = conversation.usedPrenote;
+  if (!note?.title && !note?.text) return undefined;
+  return {
+    id: cleanOneLine(note.id, 140) || "used-prenote",
+    title: cleanOneLine(note.title, 160) || "Prepared Note",
+    text: cleanParagraph(note.text, 12000) || cleanOneLine(note.title, 160) || "Prepared Note",
+    selected: true,
+  };
+}
+
+async function cloudConversationToRecord(
+  user: AuthUser,
+  runtimeConfig: RuntimeConfig,
+  conversation: CloudConversation,
+): Promise<ConversationRecord> {
+  const [transcriptResult, cuesResult, summaryResult] = await Promise.allSettled([
+    getTranscriptApi(user, runtimeConfig, conversation.conversationId),
+    getCuesApi(user, runtimeConfig, conversation.conversationId),
+    conversation.summaryStatus === "READY"
+      ? getSummaryApi(user, runtimeConfig, conversation.conversationId)
+      : Promise.resolve(null),
+  ]);
+  const chunks = transcriptResult.status === "fulfilled" ? transcriptResult.value : [];
+  const cloudCues = cuesResult.status === "fulfilled" ? cuesResult.value : [];
+  const cloudSummary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
+  const transcript = chunks.map((chunk, index) => transcriptLineFromChunk(chunk, conversation, index));
+  const cueHistory = cloudCues.map(cloudCueToUi).filter((cue): cue is AiCue => Boolean(cue));
+  const title = titleFromCloudConversation(conversation, transcript, cloudSummary);
+  const started = dateFromIso(conversation.startedAt);
+  return {
+    id: conversation.conversationId,
+    title,
+    startedAt: started ? formatRecordDate(started) : conversation.startedAt,
+    location: "CueFlow",
+    duration: durationFromConversation(conversation),
+    summary: cloudSummary
+      ? cloudSummaryToUi(cloudSummary, title)
+      : queuedSummary(title, cloudSummaryStatus(conversation.summaryStatus)),
+    transcript,
+    cueHistory,
+    usedPrenote: usedPrenoteFromCloud(conversation),
+  };
+}
+
 export default function App() {
   const [authUser, setAuthUser] = useState<AuthUser | null>(() => storedUser());
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig>(() => initialRuntimeConfig());
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [loginForm, setLoginForm] = useState<LoginForm>({
     name: "",
@@ -671,7 +1241,9 @@ export default function App() {
   const [livePage, setLivePage] = useState<ConversationPage>("workspace");
   const [historyPage, setHistoryPage] = useState<ConversationPage>("workspace");
   const [settings, setSettings] = useState<ConversationSettings>(DEFAULT_SETTINGS);
-  const [records, setRecords] = useState<ConversationRecord[]>(SAMPLE_RECORDS);
+  const [records, setRecords] = useState<ConversationRecord[]>([]);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [recordsError, setRecordsError] = useState("");
   const [prenotes, setPrenotes] = useState<Prenote[]>([]);
   const [prenotesLoading, setPrenotesLoading] = useState(false);
   const [prenotesError, setPrenotesError] = useState("");
@@ -687,6 +1259,8 @@ export default function App() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [activeStartedAt, setActiveStartedAt] = useState<Date | null>(null);
   const [activeRecordTitle, setActiveRecordTitle] = useState("New conversation");
+  const [isStartingConversation, setIsStartingConversation] = useState(false);
+  const [isEndingConversation, setIsEndingConversation] = useState(false);
   const [swipedRecordId, setSwipedRecordId] = useState<string | null>(null);
   const [swipedPrenoteId, setSwipedPrenoteId] = useState<string | null>(null);
   const [selectedCueDetail, setSelectedCueDetail] = useState<AiCue | null>(null);
@@ -699,16 +1273,66 @@ export default function App() {
   }, 0);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioSegmentPartsRef = useRef<Blob[]>([]);
+  const recordingSegmentTimerRef = useRef<number | null>(null);
+  const recorderStopResolversRef = useRef<Array<() => void>>([]);
+  const transcriptionQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const webSocketRef = useRef<WebSocket | null>(null);
   const shouldListenRef = useRef(false);
+  const restoringActiveConversationRef = useRef(false);
   const activeConversationIdRef = useRef<string | null>(null);
+  const runtimeConfigRef = useRef<RuntimeConfig>(runtimeConfig);
   const transcriptRef = useRef<TranscriptLine[]>([]);
   const cuesRef = useRef<AiCue[]>([]);
+  const elapsedSecondsRef = useRef(0);
+  const settingsRef = useRef<ConversationSettings>(settings);
+  const activePrenoteRef = useRef<Prenote | null>(activePrenote);
   const cueTimerRef = useRef<number | null>(null);
   const cueInFlightRef = useRef(false);
   const recordPointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const skipNextRecordClickRef = useRef(false);
   const prenotePointerRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const skipNextPrenoteClickRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/runtime-config.json", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return await response.json() as Partial<RuntimeConfig>;
+      })
+      .then((config) => {
+        if (!config || cancelled) return;
+        setRuntimeConfig((current) => ({
+          apiBase: import.meta.env.VITE_CUEFLOW_API_BASE?.trim() || cleanOneLine(config.apiBase, 500) || current.apiBase,
+          webSocketUrl: import.meta.env.VITE_CUEFLOW_WS_URL?.trim() || cleanOneLine(config.webSocketUrl, 500) || current.webSocketUrl,
+        }));
+      })
+      .catch(() => {
+        // Local dev can run without a runtime config endpoint.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    runtimeConfigRef.current = runtimeConfig;
+  }, [runtimeConfig]);
+
+  useEffect(() => {
+    elapsedSecondsRef.current = elapsedSeconds;
+  }, [elapsedSeconds]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    activePrenoteRef.current = activePrenote;
+  }, [activePrenote]);
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
@@ -738,6 +1362,45 @@ export default function App() {
 
   useEffect(() => {
     if (!authUser) {
+      setRecords([]);
+      setRecordsError("");
+      setRecordsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    async function load() {
+      if (!authUser) return;
+      setRecordsLoading(true);
+      setRecordsError("");
+      try {
+        const conversations = await listConversationsApi(authUser, runtimeConfigRef.current);
+        const cloudRecords = await Promise.all(conversations.map((conversation) => (
+          cloudConversationToRecord(authUser, runtimeConfigRef.current, conversation)
+        )));
+        if (!cancelled) {
+          setRecords(cloudRecords);
+          if (!activeRecordId && cloudRecords[0]) setActiveRecordId(cloudRecords[0].id);
+        }
+      } catch (error) {
+        if (!cancelled) setRecordsError(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (!cancelled) setRecordsLoading(false);
+      }
+    }
+
+    void load();
+    const refresh = window.setInterval(() => {
+      if (!activeConversationIdRef.current) void load();
+    }, 12000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(refresh);
+    };
+  }, [authUser?.email, runtimeConfig.apiBase]);
+
+  useEffect(() => {
+    if (!authUser) {
       setPrenotes([]);
       setPrenotesError("");
       setPrenotesLoading(false);
@@ -763,9 +1426,86 @@ export default function App() {
     };
   }, [authUser?.email]);
 
+  useEffect(() => {
+    if (!authUser || activeConversationIdRef.current || restoringActiveConversationRef.current) return;
+    const saved = storedActiveConversation(authUser);
+    if (!saved) return;
+
+    let cancelled = false;
+    restoringActiveConversationRef.current = true;
+    setConnectionStatus("restoring session");
+    void (async () => {
+      try {
+        const conversation = await getConversationApi(authUser, runtimeConfigRef.current, saved.conversationId);
+        if (cancelled) return;
+        if (conversation.status !== "ACTIVE") {
+          persistActiveConversation(authUser, null);
+          return;
+        }
+
+        const [chunks, cloudCues] = await Promise.all([
+          getTranscriptApi(authUser, runtimeConfigRef.current, conversation.conversationId),
+          getCuesApi(authUser, runtimeConfigRef.current, conversation.conversationId),
+        ]);
+        if (cancelled) return;
+
+        const startedAt = dateFromIso(conversation.startedAt) ?? dateFromIso(saved.startedAt) ?? new Date();
+        const restoredTranscript = chunks.map((chunk, index) => transcriptLineFromChunk(chunk, conversation, index));
+        const restoredCues = cloudCues
+          .map(cloudCueToUi)
+          .filter((cue): cue is AiCue => Boolean(cue))
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+        setActiveConversationId(conversation.conversationId);
+        activeConversationIdRef.current = conversation.conversationId;
+        setActiveStartedAt(startedAt);
+        setActiveRecordTitle(saved.title || titleFromCloudConversation(conversation, restoredTranscript, null));
+        const elapsed = Math.max(0, Math.round((Date.now() - startedAt.getTime()) / 1000));
+        setElapsedSeconds(elapsed);
+        elapsedSecondsRef.current = elapsed;
+        setTranscript(restoredTranscript);
+        transcriptRef.current = restoredTranscript;
+        setCues(restoredCues);
+        cuesRef.current = restoredCues;
+        setIsListening(false);
+        shouldListenRef.current = false;
+        setLivePage("workspace");
+        setScreen("live");
+        await connectConversationSocket(conversation);
+        if (!cancelled) setConnectionStatus("paused");
+      } catch (error) {
+        if (!cancelled) {
+          setConnectionStatus("restore failed");
+          setRecordsError(error instanceof Error ? error.message : String(error));
+          persistActiveConversation(authUser, null);
+        }
+      } finally {
+        restoringActiveConversationRef.current = false;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      restoringActiveConversationRef.current = false;
+    };
+  }, [authUser?.email, runtimeConfig.apiBase, runtimeConfig.webSocketUrl]);
+
   useEffect(() => () => {
     shouldListenRef.current = false;
+    if (recordingSegmentTimerRef.current) {
+      window.clearTimeout(recordingSegmentTimerRef.current);
+      recordingSegmentTimerRef.current = null;
+    }
+    try {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.stop();
+      }
+    } catch {
+      // Ignore recorder shutdown races during page unload.
+    }
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     recognitionRef.current?.abort();
+    webSocketRef.current?.close();
     if (cueTimerRef.current) window.clearTimeout(cueTimerRef.current);
   }, []);
 
@@ -814,6 +1554,10 @@ export default function App() {
         setConnectionStatus("listening");
         return;
       }
+      if (mediaRecorderRef.current?.state === "recording" || mediaStreamRef.current) {
+        setConnectionStatus("cloud stt listening");
+        return;
+      }
       shouldListenRef.current = false;
       setIsListening(false);
       setConnectionStatus(event.error === "not-allowed" || event.error === "service-not-allowed"
@@ -836,9 +1580,162 @@ export default function App() {
     return recognition;
   }
 
-  function startRecognition() {
+  function preferredAudioMimeType(): string {
+    if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return "";
+    return [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg;codecs=opus",
+    ].find((type) => MediaRecorder.isTypeSupported(type)) || "";
+  }
+
+  function clearRecordingSegmentTimer() {
+    if (!recordingSegmentTimerRef.current) return;
+    window.clearTimeout(recordingSegmentTimerRef.current);
+    recordingSegmentTimerRef.current = null;
+  }
+
+  function queueAudioTranscription(blob: Blob) {
+    const userSnapshot = authUser;
+    const conversationId = activeConversationIdRef.current;
+    if (!userSnapshot || !conversationId) return;
+    if (blob.size < MIN_AUDIO_BLOB_BYTES) {
+      setConnectionStatus(shouldListenRef.current ? "listening" : "paused");
+      return;
+    }
+    const runtimeSnapshot = runtimeConfigRef.current;
+    const settingsSnapshot = settingsRef.current;
+    const prenoteSnapshot = activePrenoteRef.current;
+
+    transcriptionQueueRef.current = transcriptionQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (activeConversationIdRef.current !== conversationId) return;
+        setConnectionStatus("transcribing");
+        const text = await transcribeAudioApi(userSnapshot, runtimeSnapshot, blob, settingsSnapshot, prenoteSnapshot);
+        if (activeConversationIdRef.current !== conversationId) return;
+        if (text) {
+          appendTranscript(text);
+        } else {
+          setConnectionStatus(shouldListenRef.current ? "listening" : "paused");
+        }
+      })
+      .catch((error) => {
+        if (activeConversationIdRef.current === conversationId) {
+          const message = error instanceof Error ? error.message : "transcription failed";
+          if (message.includes("Payload") || message.includes("too large")) {
+            setConnectionStatus("audio too large");
+          } else {
+            setConnectionStatus(shouldListenRef.current ? "listening" : "transcription failed");
+          }
+        }
+      });
+  }
+
+  function startRecordingSegment(stream: MediaStream): boolean {
+    if (!shouldListenRef.current || !activeConversationIdRef.current) return false;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") return true;
+
+    try {
+      const mimeType = preferredAudioMimeType();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      audioSegmentPartsRef.current = [];
+      mediaRecorderRef.current = recorder;
+
+      recorder.onstart = () => {
+        setConnectionStatus("cloud stt listening");
+      };
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size) audioSegmentPartsRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        clearRecordingSegmentTimer();
+        setConnectionStatus("cloud stt error");
+      };
+      recorder.onstop = () => {
+        clearRecordingSegmentTimer();
+        if (mediaRecorderRef.current === recorder) mediaRecorderRef.current = null;
+        const parts = audioSegmentPartsRef.current;
+        audioSegmentPartsRef.current = [];
+        if (parts.length) {
+          const type = recorder.mimeType || parts[0]?.type || mimeType || "audio/webm";
+          queueAudioTranscription(new Blob(parts, { type }));
+        }
+        if (shouldListenRef.current && activeConversationIdRef.current && mediaStreamRef.current === stream) {
+          window.setTimeout(() => {
+            if (shouldListenRef.current && activeConversationIdRef.current && mediaStreamRef.current === stream) {
+              startRecordingSegment(stream);
+            }
+          }, 80);
+        }
+        const resolvers = recorderStopResolversRef.current.splice(0);
+        resolvers.forEach((resolve) => resolve());
+      };
+
+      recorder.start();
+      recordingSegmentTimerRef.current = window.setTimeout(() => {
+        if (recorder.state === "recording") {
+          try {
+            recorder.requestData();
+          } catch {
+            // stop() will still emit the available data in most browsers.
+          }
+          try {
+            recorder.stop();
+          } catch {
+            clearRecordingSegmentTimer();
+          }
+        }
+      }, CLOUD_STT_SEGMENT_MS);
+      setConnectionStatus("cloud stt listening");
+      return true;
+    } catch {
+      setConnectionStatus("cloud stt unavailable");
+      return false;
+    }
+  }
+
+  async function startCloudTranscription(): Promise<boolean> {
+    if (!window.isSecureContext) {
+      setConnectionStatus("microphone requires https");
+      return false;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      return false;
+    }
+    if (mediaRecorderRef.current?.state === "recording") {
+      shouldListenRef.current = true;
+      setConnectionStatus("cloud stt listening");
+      return true;
+    }
+    if (mediaStreamRef.current) {
+      shouldListenRef.current = true;
+      return startRecordingSegment(mediaStreamRef.current);
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      mediaStreamRef.current = stream;
+      shouldListenRef.current = true;
+      setConnectionStatus("connecting cloud stt");
+      return startRecordingSegment(stream);
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : "";
+      setConnectionStatus(name === "NotAllowedError" || name === "SecurityError" ? "microphone blocked" : "cloud stt unavailable");
+      return false;
+    }
+  }
+
+  function startBrowserRecognition(): boolean {
     const recognition = recognitionRef.current ?? createRecognition();
-    if (!recognition) return;
+    if (!recognition) return false;
     recognitionRef.current = recognition;
     shouldListenRef.current = true;
     try {
@@ -847,22 +1744,205 @@ export default function App() {
     } catch {
       setConnectionStatus("listening");
     }
+    return true;
   }
 
-  function stopRecognition(nextStatus = "paused") {
+  async function startRecognition(): Promise<boolean> {
+    shouldListenRef.current = true;
+    setConnectionStatus("connecting audio");
+    const browserStarted = startBrowserRecognition();
+    const cloudStarted = await startCloudTranscription();
+    if (browserStarted || cloudStarted) {
+      setConnectionStatus(browserStarted ? "listening" : "cloud stt listening");
+      return true;
+    }
+    return false;
+  }
+
+  function stopRecognition(nextStatus = "paused"): Promise<void> {
     shouldListenRef.current = false;
+    clearRecordingSegmentTimer();
+    const recorder = mediaRecorderRef.current;
+    let recorderStopped: Promise<void> = Promise.resolve();
+    if (recorder && recorder.state !== "inactive") {
+      recorderStopped = new Promise((resolve) => {
+        let resolved = false;
+        const finish = () => {
+          if (resolved) return;
+          resolved = true;
+          resolve();
+        };
+        recorderStopResolversRef.current.push(finish);
+        window.setTimeout(finish, 1200);
+      });
+      try {
+        recorder.requestData();
+        recorder.stop();
+      } catch {
+        // The stream cleanup below still releases the microphone.
+        mediaRecorderRef.current = null;
+        audioSegmentPartsRef.current = [];
+        const resolvers = recorderStopResolversRef.current.splice(0);
+        resolvers.forEach((resolve) => resolve());
+      }
+    }
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
     try {
       recognitionRef.current?.stop();
     } catch {
       recognitionRef.current?.abort();
     }
     setConnectionStatus(nextStatus);
+    return recorderStopped;
+  }
+
+  async function refreshRecords(preferredRecordId?: string) {
+    if (!authUser) return;
+    setRecordsLoading(true);
+    setRecordsError("");
+    try {
+      const conversations = await listConversationsApi(authUser, runtimeConfigRef.current);
+      const cloudRecords = await Promise.all(conversations.map((conversation) => (
+        cloudConversationToRecord(authUser, runtimeConfigRef.current, conversation)
+      )));
+      setRecords(cloudRecords);
+      const targetId = preferredRecordId
+        ?? (activeRecordId && cloudRecords.some((record) => record.id === activeRecordId) ? activeRecordId : cloudRecords[0]?.id);
+      if (targetId) setActiveRecordId(targetId);
+    } catch (error) {
+      setRecordsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRecordsLoading(false);
+    }
+  }
+
+  function handleWebSocketMessage(event: MessageEvent<string>, conversationId: string) {
+    try {
+      const payload = JSON.parse(event.data) as Partial<TranscriptAckEvent | CueCreatedEvent | SummaryReadyEvent>;
+      if (payload.conversationId && payload.conversationId !== conversationId) return;
+
+      if (payload.eventType === "transcript.ack") {
+        setConnectionStatus(shouldListenRef.current ? "listening" : "paused");
+        return;
+      }
+
+      if (payload.eventType === "cue.created") {
+        const cuePayload = (payload as CueCreatedEvent).cue;
+        const cue = cloudCueToUi({
+          cueId: cuePayload.cueId,
+          type: cuePayload.type,
+          title: cuePayload.title,
+          shortText: cuePayload.shortText,
+          detailText: cuePayload.detailText,
+          sourceChunkStart: cuePayload.sourceChunkStart,
+          sourceChunkEnd: cuePayload.sourceChunkEnd,
+          confidence: cuePayload.confidence,
+          createdAt: cuePayload.createdAt,
+        });
+        if (!cue) return;
+        setCues((current) => {
+          const next = [cue, ...current.filter((item) => item.id !== cue.id)].slice(0, 20);
+          cuesRef.current = next;
+          return next;
+        });
+        setConnectionStatus(shouldListenRef.current ? "listening" : "ai cue ready");
+        return;
+      }
+
+      if (payload.eventType === "summary.ready") {
+        setConnectionStatus("summary ready");
+        void refreshRecords(payload.conversationId);
+      }
+    } catch {
+      // Ignore malformed socket payloads from retries or test tools.
+    }
+  }
+
+  function connectConversationSocket(conversation: CloudConversation): Promise<boolean> {
+    if (!authUser) return Promise.resolve(false);
+    const url = webSocketUrlForConversation(runtimeConfigRef.current, conversation.conversationId, authUser);
+    if (!url) {
+      setConnectionStatus("cloud socket unavailable");
+      return Promise.resolve(false);
+    }
+
+    webSocketRef.current?.close();
+    setConnectionStatus("connecting cloud");
+
+    return new Promise((resolve) => {
+      const socket = new WebSocket(url);
+      let settled = false;
+      const timeout = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        setConnectionStatus("cloud socket timeout");
+        socket.close();
+        resolve(false);
+      }, 7000);
+
+      socket.onopen = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        webSocketRef.current = socket;
+        setConnectionStatus("cloud connected");
+        resolve(true);
+      };
+
+      socket.onmessage = (event) => handleWebSocketMessage(event, conversation.conversationId);
+
+      socket.onerror = () => {
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timeout);
+          setConnectionStatus("cloud socket failed");
+          resolve(false);
+        }
+      };
+
+      socket.onclose = () => {
+        if (webSocketRef.current === socket) webSocketRef.current = null;
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timeout);
+          resolve(false);
+        }
+        if (activeConversationIdRef.current === conversation.conversationId && shouldListenRef.current) {
+          setConnectionStatus("cloud socket closed");
+        }
+      };
+    });
+  }
+
+  function sendTranscriptChunk(line: TranscriptLine, conversationId: string, prenote: Prenote | null) {
+    const socket = webSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setConnectionStatus("cloud socket unavailable");
+      if (settingsRef.current.autoCue && shouldGenerateCue(transcriptRef.current, cuesRef.current, prenote)) {
+        void generateCueForTranscript(transcriptRef.current.slice(-8), prenote, settingsRef.current);
+      }
+      return;
+    }
+
+    const message: WebSocketSendTranscriptMessage = {
+      action: "sendTranscript",
+      conversationId,
+      chunkId: line.id.replace(/^line-/, "chunk-"),
+      speaker: "speaker",
+      text: line.text,
+      clientTimestamp: new Date().toISOString(),
+      autoCue: settingsRef.current.autoCue,
+      ...(promptContextFromPrenote(prenote) ? { promptContext: promptContextFromPrenote(prenote) } : {}),
+    };
+    socket.send(JSON.stringify(message));
+    setConnectionStatus("transcript sent");
   }
 
   function upsertPartialTranscript(text: string) {
     const conversationId = activeConversationIdRef.current;
     if (!conversationId) return;
-    const time = elapsedLabel(elapsedSeconds);
+    const time = elapsedLabel(elapsedSecondsRef.current);
     setTranscript((current) => {
       const withoutPartial = current.filter((line) => !line.partial);
       const next = [...withoutPartial, { id: "partial", time, text, partial: true }];
@@ -878,13 +1958,17 @@ export default function App() {
     if (!clean) return;
     const line: TranscriptLine = {
       id: `line-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-      time: elapsedLabel(elapsedSeconds),
+      time: elapsedLabel(elapsedSecondsRef.current),
       text: clean,
     };
     setTranscript((current) => {
+      if (isNearDuplicateTranscript(clean, current)) {
+        transcriptRef.current = current.filter((item) => !item.partial);
+        return transcriptRef.current;
+      }
       const next = [...current.filter((item) => !item.partial), line];
       transcriptRef.current = next;
-      maybeQueueCue(next);
+      sendTranscriptChunk(line, conversationId, activePrenoteRef.current);
       return next;
     });
   }
@@ -1073,14 +2157,19 @@ export default function App() {
     if (activeConversationIdRef.current) {
       stopRecognition("signed out");
     }
+    webSocketRef.current?.close();
+    webSocketRef.current = null;
     setIsListening(false);
     setActiveConversationId(null);
     activeConversationIdRef.current = null;
     setAuthUser(null);
+    setRecords([]);
+    setRecordsError("");
     setPrenotes([]);
     setPrenotesError("");
     setSwipedPrenoteId(null);
     setActivePrenoteId(null);
+    if (authUser) persistActiveConversation(authUser, null);
     persistUser(null);
     setIsAccountOpen(false);
     setScreen("home");
@@ -1088,50 +2177,99 @@ export default function App() {
     setAuthMode("signin");
   }
 
-  function startConversation() {
-    const startedAt = new Date();
-    const id = `conv-${Date.now().toString(36)}`;
-    setActiveConversationId(id);
-    activeConversationIdRef.current = id;
-    setActiveStartedAt(startedAt);
-    setActiveRecordTitle("New conversation");
-    setElapsedSeconds(0);
-    setCues([]);
-    setTranscript([]);
-    transcriptRef.current = [];
-    cuesRef.current = [];
-    setIsListening(true);
-    setLivePage("workspace");
-    setScreen("live");
-    startRecognition();
+  async function startConversation() {
+    if (!authUser || isStartingConversation) return;
+    setIsStartingConversation(true);
+    setConnectionStatus("creating session");
+    try {
+      const conversation = await createConversationApi(authUser, runtimeConfigRef.current);
+      const startedAt = dateFromIso(conversation.startedAt) ?? new Date();
+      persistActiveConversation(authUser, {
+        conversationId: conversation.conversationId,
+        userId: userIdForApi(authUser),
+        startedAt: startedAt.toISOString(),
+        title: "New conversation",
+      });
+      setActiveConversationId(conversation.conversationId);
+      activeConversationIdRef.current = conversation.conversationId;
+      setActiveStartedAt(startedAt);
+      setActiveRecordTitle("New conversation");
+      setElapsedSeconds(0);
+      elapsedSecondsRef.current = 0;
+      setCues([]);
+      setTranscript([]);
+      transcriptRef.current = [];
+      cuesRef.current = [];
+      setIsListening(true);
+      setLivePage("workspace");
+      setScreen("live");
+      await connectConversationSocket(conversation);
+      void startRecognition();
+    } catch (error) {
+      setConnectionStatus("session start failed");
+      setRecordsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsStartingConversation(false);
+    }
   }
 
-  function endConversation() {
-    stopRecognition("saving");
+  async function endConversation() {
+    if (isEndingConversation) return;
+    const conversationId = activeConversationIdRef.current;
+    if (!conversationId) return;
+    setIsEndingConversation(true);
     setIsListening(false);
+    await stopRecognition("saving");
+    await transcriptionQueueRef.current.catch(() => undefined);
     const finalTranscript = transcriptRef.current.filter((line) => !line.partial);
     const finalCues = cuesRef.current;
     const startedAt = activeStartedAt ?? new Date();
     const title = finalTranscript[0]?.text.slice(0, 52) || activeRecordTitle;
     const draftRecord: ConversationRecord = {
-      id: activeConversationIdRef.current ?? `record-${Date.now().toString(36)}`,
+      id: conversationId,
       title,
       startedAt: formatRecordDate(startedAt),
       location: "CueFlow",
-      duration: elapsedLabel(elapsedSeconds),
-      summary: queuedSummary(title),
+      duration: elapsedLabel(elapsedSecondsRef.current),
+      summary: queuedSummary(title, "running"),
       transcript: finalTranscript,
       cueHistory: finalCues,
-      usedPrenote: activePrenote ?? undefined,
+      usedPrenote: activePrenoteRef.current ?? undefined,
     };
     setRecords((current) => [draftRecord, ...current.filter((record) => record.id !== draftRecord.id)]);
     setActiveRecordId(draftRecord.id);
-    setActiveConversationId(null);
-    activeConversationIdRef.current = null;
-    setConnectionStatus("ready");
     setHistoryPage("workspace");
     setScreen("history");
-    void generateSummaryForRecord(draftRecord);
+    setConnectionStatus("saving summary");
+    try {
+      if (authUser) {
+        await endConversationApi(
+          authUser,
+          runtimeConfigRef.current,
+          conversationId,
+          promptContextFromPrenote(activePrenoteRef.current),
+          activePrenoteRef.current,
+        );
+        setConnectionStatus("summary queued");
+        void refreshRecords(conversationId);
+        window.setTimeout(() => void refreshRecords(conversationId), 5000);
+        window.setTimeout(() => void refreshRecords(conversationId), 14000);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRecords((current) => current.map((record) => (
+        record.id === conversationId ? { ...record, summary: queuedSummary(title, "failed", message) } : record
+      )));
+      setRecordsError(message);
+      setConnectionStatus("save failed");
+    } finally {
+      webSocketRef.current?.close();
+      webSocketRef.current = null;
+      if (authUser) persistActiveConversation(authUser, null);
+      setActiveConversationId(null);
+      activeConversationIdRef.current = null;
+      setIsEndingConversation(false);
+    }
   }
 
   async function generateSummaryForRecord(record: ConversationRecord) {
@@ -1160,7 +2298,7 @@ export default function App() {
       stopRecognition("paused");
     } else {
       setIsListening(true);
-      startRecognition();
+      void startRecognition();
     }
   }
 
@@ -1400,7 +2538,7 @@ export default function App() {
                     <ChevronRight size={30} strokeWidth={1.45} />
                   </div>
                 </div>
-              )) : <p className="empty-note-state">-</p>}
+              )) : <p className="empty-note-state">No prepared notes</p>}
             </div>
           )}
         </section>
@@ -1525,16 +2663,17 @@ export default function App() {
         </section>
         {renderConversationPages(livePage, setLivePage, Boolean(activePrenote))}
         <section className="live-content">
-          {livePage === "workspace" ? renderLiveWorkspace(cues, transcript) : renderPrenotePage(activePrenote)}
+          {livePage === "workspace" ? renderLiveWorkspace(cues, transcript, setSelectedCueDetail) : renderPrenotePage(activePrenote)}
         </section>
         <footer className="live-actions">
           <button onClick={togglePauseConversation}>
             <Pause size={29} strokeWidth={1.4} /> {isListening ? "Pause" : "Resume"}
           </button>
-          <button onClick={endConversation}>
-            <X size={31} strokeWidth={1.35} /> End
+          <button onClick={endConversation} disabled={isEndingConversation}>
+            <X size={31} strokeWidth={1.35} /> {isEndingConversation ? "Saving" : "End"}
           </button>
         </footer>
+        {selectedCueDetail && renderCueDetailModal(selectedCueDetail, () => setSelectedCueDetail(null))}
       </main>
     );
   }
@@ -1643,17 +2782,20 @@ export default function App() {
       )}
 
       <section className="home-start-section">
-        <button className="start-button" onClick={startConversation}>
-          <span>-&gt;</span> Start
+        <button className="start-button" onClick={startConversation} disabled={isStartingConversation}>
+          <span>-&gt;</span> {isStartingConversation ? "Starting" : "Start"}
         </button>
       </section>
 
       <section className="record-section">
         <div className="section-row">
           <h2>My Records</h2>
-          <span>{records.length}</span>
+          <span>{recordsLoading ? "..." : records.length}</span>
         </div>
+        {recordsError && <p className="settings-error">{recordsError}</p>}
         <div className="record-list">
+          {recordsLoading && !records.length ? <p className="empty-note-state">Loading</p> : null}
+          {!recordsLoading && !records.length ? <p className="empty-note-state">No records yet</p> : null}
           {records.map((record) => (
             <div className={swipedRecordId === record.id ? "record-row swiped" : "record-row"} key={record.id}>
               <button className="record-delete-button" onClick={() => deleteHistoryRecord(record.id)}>
@@ -1696,8 +2838,8 @@ export default function App() {
           )) : (
             <button className="prenote-card" type="button" onClick={() => setScreen("prenoteManager")}>
               <span className="note-checkbox" />
-              <h3>-</h3>
-              <p>-</p>
+              <h3>No notes</h3>
+              <p>Add context</p>
             </button>
           )}
         </div>
@@ -1724,10 +2866,10 @@ function renderConversationPages(active: ConversationPage, onChange: (page: Conv
   );
 }
 
-function renderLiveWorkspace(cues: AiCue[], transcript: TranscriptLine[]) {
+function renderLiveWorkspace(cues: AiCue[], transcript: TranscriptLine[], onCueSelect: (cue: AiCue) => void) {
   return (
     <div className="dual-workspace live-workspace">
-      {renderCuePanel(cues)}
+      {renderCuePanel(cues, onCueSelect)}
       <div className="workspace-side">
         {renderTranscript(transcript, true, "Transcript")}
       </div>
@@ -1746,22 +2888,63 @@ function renderHistoryWorkspace(record: ConversationRecord, onCueSelect: (cue: A
   );
 }
 
-function renderCuePanel(cues: AiCue[]) {
+function renderCuePanel(cues: AiCue[], onCueSelect: (cue: AiCue) => void) {
+  const currentCue = cues[0];
+  const olderCues = cues.slice(1, 7);
+  const currentMeta = currentCue ? cueMetaItems(currentCue) : [];
+
   return (
     <section className="summary-card cue-panel-card">
-      <h2>Current AI Cue</h2>
-      {cues[0] ? <p className="panel-copy">{cues[0].output}</p> : <div className="empty-state summary-empty">-</div>}
-      <h2>AI Cues</h2>
-      <div className="cue-list">
-        {cues.length ? cues.slice(0, 6).map((cue) => (
-          <article className="cue-row" key={cue.id}>
-            <span className="cue-icon">{cueIcon(cue.category)}</span>
-            <div>
-              <h3>{cue.title}</h3>
-              <p>{cue.output}</p>
+      <div className="cue-panel-heading">
+        <h2>Current AI Cue</h2>
+        <span>{cues.length ? `${cues.length} total` : "Live"}</span>
+      </div>
+      {currentCue ? (
+        <button className={`current-cue cue-tone-${currentCue.category}`} type="button" onClick={() => onCueSelect(currentCue)}>
+          <div className="cue-card-top">
+            <span className="cue-type-badge">
+              <span>{cueIcon(currentCue.category)}</span>
+              {cueLabel(currentCue.category)}
+            </span>
+            {formatCueConfidence(currentCue.confidence) ? (
+              <span className="cue-confidence">{formatCueConfidence(currentCue.confidence)}</span>
+            ) : null}
+          </div>
+          <h3>{currentCue.title}</h3>
+          <p className="cue-short">{currentCue.shortText}</p>
+          {currentCue.detailText !== currentCue.shortText ? <p className="cue-detail-preview">{currentCue.detailText}</p> : null}
+          {currentMeta.length ? (
+            <div className="cue-meta-row">
+              {currentMeta.map((item) => <span key={item}>{item}</span>)}
             </div>
-          </article>
-        )) : <div className="empty-state">-</div>}
+          ) : null}
+        </button>
+      ) : (
+        <div className="empty-state summary-empty cue-empty-state">
+          <span>No current cue</span>
+          <small>Waiting</small>
+        </div>
+      )}
+      <div className="cue-panel-heading cue-history-heading">
+        <h2>Recent AI Cues</h2>
+        <span>{olderCues.length ? `${olderCues.length}` : "-"}</span>
+      </div>
+      <div className="cue-list">
+        {olderCues.length ? olderCues.map((cue) => (
+          <button className={`cue-row cue-tone-${cue.category}`} key={cue.id} type="button" onClick={() => onCueSelect(cue)}>
+            <span className="cue-icon" aria-hidden="true">{cueIcon(cue.category)}</span>
+            <div>
+              <div className="cue-row-title">
+                <h3>{cue.title}</h3>
+                <span>{cueLabel(cue.category)}</span>
+              </div>
+              <p>{cue.shortText}</p>
+              <div className="cue-meta-row compact">
+                {cueMetaItems(cue).map((item) => <span key={item}>{item}</span>)}
+              </div>
+            </div>
+          </button>
+        )) : <div className="empty-state cue-empty-state"><span>No earlier cue</span></div>}
       </div>
     </section>
   );
@@ -1833,9 +3016,10 @@ function renderCueGroups(cues: AiCue[], onCueSelect: (cue: AiCue) => void) {
           </summary>
           <div className="cue-chip-row">
             {groups[category].map((cue) => (
-              <button className="cue-chip" key={cue.id} type="button" onClick={() => onCueSelect(cue)}>
+              <button className={`cue-chip cue-tone-${cue.category}`} key={cue.id} type="button" onClick={() => onCueSelect(cue)}>
                 <span>{cueIcon(cue.category)}</span>
-                {cue.title}
+                <strong>{cueLabel(cue.category)}</strong>
+                <span>{cue.title}</span>
               </button>
             ))}
           </div>
@@ -1846,19 +3030,33 @@ function renderCueGroups(cues: AiCue[], onCueSelect: (cue: AiCue) => void) {
 }
 
 function renderCueDetailModal(cue: AiCue, onClose: () => void) {
+  const metaItems = cueMetaItems(cue);
+
   return (
     <div className="cue-modal-backdrop" role="presentation" onClick={onClose}>
       <article className="cue-modal" role="dialog" aria-modal="true" aria-label={cue.title} onClick={(event) => event.stopPropagation()}>
         <header>
           <div>
-            <span>{cueIcon(cue.category)}</span>
-            <h2>{cue.title}</h2>
+            <span className="cue-modal-icon">{cueIcon(cue.category)}</span>
+            <div>
+              <span className="cue-type-badge">
+                <span>{cueIcon(cue.category)}</span>
+                {cueLabel(cue.category)}
+              </span>
+              <h2>{cue.title}</h2>
+            </div>
           </div>
           <button type="button" aria-label="Close" onClick={onClose}>
             <X size={24} strokeWidth={1.8} />
           </button>
         </header>
-        <p>{cue.output}</p>
+        <p className="cue-modal-short">{cue.shortText}</p>
+        {cue.detailText !== cue.shortText ? <p>{cue.detailText}</p> : null}
+        {metaItems.length ? (
+          <div className="cue-meta-row modal-meta">
+            {metaItems.map((item) => <span key={item}>{item}</span>)}
+          </div>
+        ) : null}
       </article>
     </div>
   );
@@ -1910,7 +3108,7 @@ function TranscriptCard({ lines, autoFollow, title }: { lines: TranscriptLine[];
           <time>{line.time}</time>
           <p>{line.text}</p>
         </article>
-      )) : <div className="empty-state">-</div>}
+      )) : <div className="empty-state">No transcript yet</div>}
     </section>
   );
 }
@@ -1919,7 +3117,7 @@ function renderPrenote(note: Prenote | null) {
   return (
     <section className="summary-card prenote-readonly">
       <h2>{note?.title || "Prepared Notes"}</h2>
-      <pre>{note?.text || "-"}</pre>
+      <pre>{note?.text || "No prepared note selected"}</pre>
     </section>
   );
 }

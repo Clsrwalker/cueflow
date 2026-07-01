@@ -7,10 +7,22 @@ export type CueContextWindow = {
   now?: string;
 };
 
-export type CueProviderResult = Pick<
+export type DisplayCueProviderResult = Pick<
   Cue,
   "type" | "title" | "shortText" | "detailText" | "sourceChunkStart" | "sourceChunkEnd" | "confidence"
->;
+> & {
+  display?: true;
+};
+
+export type SkippedCueProviderResult = {
+  display: false;
+  skipReason: string;
+  sourceChunkStart: string;
+  sourceChunkEnd: string;
+  confidence: number;
+};
+
+export type CueProviderResult = DisplayCueProviderResult | SkippedCueProviderResult;
 
 export type SummaryProviderResult = Omit<ConversationSummary, "conversationId" | "createdAt">;
 

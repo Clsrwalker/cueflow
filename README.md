@@ -51,28 +51,30 @@ Open `http://localhost:5174`.
 4. Use the Prepared Notes manager to add, edit, or delete prenotes.
 5. Click Start.
 6. Allow microphone access and speak.
-7. Watch Transcript update inside the live Conversation page.
+7. Watch Transcript update inside the live Conversation page while final chunks are sent to the WebSocket backend.
 8. Use Pause/Resume or End from the bottom action bar.
-9. Review the saved summary, transcript, and AI cues from the session record.
+9. Review the saved summary, transcript, and AI cues from the persisted session record.
 
-Selected Prepared Notes are passed into local cue/summary generation as prompt context. The backend WebSocket cue path and REST summary path also accept optional `promptContext` and pass it to the configured AI provider.
+Selected Prepared Notes are passed as prompt context through the WebSocket cue path and REST summary path. Cue and summary workers call the configured OpenAI provider and persist results before the history view reloads them.
 
-The frontend uses browser speech recognition on HTTPS or localhost. The UI still works without cloud deployment, while backend provider abstractions are available for deployed REST/WebSocket runtimes.
+The frontend uses browser speech recognition on HTTPS or localhost. In the deployed demo, browser speech recognition turns microphone audio into text, then CueFlow sends final transcript chunks through API Gateway WebSocket into Lambda, SQS, DynamoDB, S3, and OpenAI.
 
 ## Environment Variables
 
-Local demo:
-- No required environment variables.
+Local UI development:
+- `VITE_CUEFLOW_API_BASE`: REST API base URL. Leave empty only when serving the frontend from the same deployed API Gateway HTTP API.
+- `VITE_CUEFLOW_WS_URL`: deployed API Gateway WebSocket URL.
 
-Frontend optional:
-- `VITE_CUEFLOW_API_BASE`: REST API base URL for a future deployed backend integration.
-- `VITE_CUEFLOW_WS_URL`: WebSocket URL for a future deployed backend integration.
+Deployed frontend runtime:
+- `/runtime-config.json` is served by the frontend asset Lambda and provides the deployed WebSocket URL to the browser.
 
 Backend and infrastructure:
 - `CUEFLOW_STAGE`: deployment stage, for example `dev`.
-- `CUEFLOW_AI_PROVIDER`: `mock` or `openai`. If omitted, CueFlow uses OpenAI when `OPENAI_API_KEY` is present and mock AI otherwise.
-- `OPENAI_API_KEY`: OpenAI API key for the optional OpenAI provider. Never commit this value.
-- `OPENAI_MODEL`: OpenAI model for cue and summary generation. Defaults to `gpt-5.4-mini`.
+- `CUEFLOW_AI_PROVIDER`: `openai` for deployed AI-backed workers, or `mock` for deterministic local tests.
+- `OPENAI_SECRET_ID`: Secrets Manager secret id or ARN that stores the OpenAI API key.
+- `OPENAI_API_KEY`: local-only OpenAI API key fallback. Never commit this value.
+- `OPENAI_MODEL`: OpenAI model for live cue generation. Defaults to `gpt-5.4-nano`.
+- `OPENAI_SUMMARY_MODEL`: OpenAI model for post-session summaries. Defaults to `gpt-5.4-mini`.
 - `CUEFLOW_TABLE_NAME`: DynamoDB table name.
 - `CUEFLOW_DATA_BUCKET_NAME`: S3 data bucket name.
 - `CUEFLOW_CUE_QUEUE_URL`: SQS cue queue URL.
@@ -91,7 +93,7 @@ copy .env.example .env
 # edit .env and set OPENAI_API_KEY
 ```
 
-The current frontend runs in-browser with live microphone transcription and local cue/summary generation. The backend provider is ready for REST/WebSocket worker runtimes that instantiate `createAiProviderFromEnv()`.
+For AWS deployments, store the key in Secrets Manager instead of bundling it into frontend or Lambda code.
 
 ## Deployment
 
@@ -105,32 +107,33 @@ Deploy when AWS credentials are configured:
 
 ```bash
 cd infra
-npm run build
-cdk deploy --all --context stage=dev
+npm run synth
+cdk deploy --all --app "node dist/index.js" --context stage=dev
 ```
 
 AWS Academy Learner Lab may block CDK bootstrap IAM role creation. If the lab provides an existing `LabRole`, use:
 
 ```bash
 cd infra
-npm run build
-cdk deploy --all --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --require-approval never
+npm run synth
+cdk deploy --all --app "node dist/index.js" --context stage=dev --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
 ```
 
-If the lab also blocks CloudFront, keep the frontend hosting stack for the architecture submission but skip that stack for the lab account:
+If the lab cannot use CDK asset publishing for Lambda bundles, upload `backend/dist/lambda` as a zip to an S3 bucket and pass it through context:
 
 ```bash
+npm run build:lambdas --workspace @cueflow/backend
+# zip backend/dist/lambda/* and upload it to S3, then:
 cd infra
-npm run build
-cdk deploy --all --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context skipFrontend=true --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
+cdk deploy CueFlowApi-dev --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --context lambdaAssetBucket=<bucket> --context lambdaAssetKey=<key.zip> --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
 ```
 
 For a Learner Lab frontend without CloudFront that still supports browser microphone permission, deploy the API Gateway HTTPS static frontend mode:
 
 ```bash
 cd infra
-npm run build
-cdk deploy CueFlowFrontend-dev --app "node dist/index.js" --context stage=dev --context bootstrapless=true --context frontendMode=api-static --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
+cdk deploy CueFlowFrontend-dev --app "node dist/index.js" --context stage=dev --context frontendMode=api-static --context disableAutoDeleteObjects=true --context labRoleArn=arn:aws:iam::<account-id>:role/LabRole --role-arn arn:aws:iam::<account-id>:role/LabRole --require-approval never
+aws s3 sync ../frontend/dist s3://<frontend-bucket-name> --delete
 ```
 
 The CDK app defines:
@@ -149,6 +152,7 @@ REST:
 - `POST /conversations`
 - `GET /conversations`
 - `GET /conversations/{conversationId}`
+- `GET /conversations/{conversationId}/transcript`
 - `GET /conversations/{conversationId}/cues`
 - `POST /conversations/{conversationId}/end`
 - `GET /conversations/{conversationId}/summary`
@@ -184,17 +188,16 @@ On `main`, deploy runs only when `AWS_ROLE_ARN` is configured.
 
 ## Known Limitations
 
-- Lambda CDK resources currently use deployable placeholder handler code. The backend logic is implemented and tested, but a production deployment should add a bundling step that packages compiled backend handlers into Lambda assets.
-- Local UI uses browser speech recognition on localhost. It is ready for demo and can later be wired to deployed REST and WebSocket URLs.
-- Authentication is intentionally minimal for the MVP. A production version should add Cognito or a JWT authorizer and restrict CORS origins.
+- Local Vite development requires `VITE_CUEFLOW_API_BASE` and `VITE_CUEFLOW_WS_URL` if you want to run against the deployed backend from localhost.
+- Browser speech recognition is the ASR layer. The real-time cloud pipeline begins at final transcript text chunks, not raw audio streaming.
+- Authentication is intentionally minimal for the course MVP. The backend uses `x-cueflow-user-id` for per-user data isolation. A production version should add Cognito or a JWT authorizer and restrict CORS origins.
+- My Records deletion is currently a client-side view action; persisted conversation deletion is not part of the MVP API.
 - AWS integration tests are mocked locally to keep the course demo runnable without a permanent AWS environment.
 
 ## Future Work
 
-- Add a Lambda bundling pipeline for compiled backend handlers.
-- Add deployed runtime wiring that packages backend handlers and uses the OpenAI provider in Lambda.
 - Add user authentication and per-user authorization.
-- Add deployed frontend environment configuration for REST and WebSocket URLs.
+- Add a persisted delete/archive API for conversation records.
 - Add cloud integration tests for a stable AWS account.
 
 ## AI-Generated Code Disclosure

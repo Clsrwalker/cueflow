@@ -23,6 +23,16 @@ function readOptionalString(input: Record<string, unknown>, field: string, error
   return value.trim() || undefined;
 }
 
+function readOptionalBoolean(input: Record<string, unknown>, field: string, errors: string[]): boolean | undefined {
+  const value = input[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") {
+    errors.push(`${field} must be a boolean`);
+    return undefined;
+  }
+  return value;
+}
+
 function isIsoLike(value: string): boolean {
   const time = Date.parse(value);
   return Number.isFinite(time);
@@ -40,6 +50,7 @@ export function validateSendTranscriptMessage(input: unknown): ValidationResult<
   const speaker = readRequiredString(input, "speaker", errors);
   const text = readRequiredString(input, "text", errors);
   const clientTimestamp = readRequiredString(input, "clientTimestamp", errors);
+  const autoCue = readOptionalBoolean(input, "autoCue", errors);
   const promptContext = readOptionalString(input, "promptContext", errors);
 
   if (action && action !== "sendTranscript") {
@@ -60,6 +71,7 @@ export function validateSendTranscriptMessage(input: unknown): ValidationResult<
       speaker,
       text,
       clientTimestamp,
+      ...(typeof autoCue === "boolean" ? { autoCue } : {}),
       ...(promptContext ? { promptContext } : {}),
     },
   };

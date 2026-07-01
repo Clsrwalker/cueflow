@@ -4,6 +4,12 @@ export type CueType = (typeof CUE_TYPES)[number];
 export type ConversationStatus = "ACTIVE" | "ENDED";
 export type SummaryStatus = "NOT_STARTED" | "PENDING" | "READY" | "FAILED";
 
+export type UsedPrenote = {
+  id: string;
+  title: string;
+  text: string;
+};
+
 export type Conversation = {
   conversationId: string;
   userId: string;
@@ -12,6 +18,7 @@ export type Conversation = {
   endedAt?: string | null;
   cueCount: number;
   summaryStatus: SummaryStatus;
+  usedPrenote?: UsedPrenote;
 };
 
 export type TranscriptChunk = {
@@ -62,6 +69,7 @@ export type WebSocketSendTranscriptMessage = {
   speaker: string;
   text: string;
   clientTimestamp: string;
+  autoCue?: boolean;
   promptContext?: string;
 };
 
@@ -90,7 +98,18 @@ export type PongEvent = {
 export type CueCreatedEvent = {
   eventType: "cue.created";
   conversationId: string;
-  cue: Pick<Cue, "cueId" | "type" | "title" | "shortText" | "detailText">;
+  cue: Pick<
+    Cue,
+    | "cueId"
+    | "type"
+    | "title"
+    | "shortText"
+    | "detailText"
+    | "sourceChunkStart"
+    | "sourceChunkEnd"
+    | "confidence"
+    | "createdAt"
+  >;
 };
 
 export type SummaryReadyEvent = {

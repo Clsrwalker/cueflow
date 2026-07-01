@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Conversation, ConversationSummary, Cue, CueType, TranscriptChunk } from "@cueflow/shared";
+import type { Conversation, ConversationSummary, Cue, CueType, TranscriptChunk, UsedPrenote } from "@cueflow/shared";
 import type { AiProvider, SummaryProviderResult } from "../ai/types.js";
 import { createAiProviderFromEnv } from "../ai/provider-factory.js";
 import type { CueFlowStore } from "../storage/types.js";
@@ -57,6 +57,7 @@ export type GenerateSummaryResult = {
 
 export type EndConversationOptions = {
   promptContext?: string;
+  usedPrenote?: UsedPrenote;
 };
 
 export type GenerateSummaryOptions = {
@@ -213,6 +214,11 @@ export class ConversationService {
     return this.store.listCues(conversation.conversationId);
   }
 
+  async listTranscriptChunks(conversationId: string): Promise<TranscriptChunk[]> {
+    const conversation = await this.getConversation(conversationId);
+    return this.store.listTranscriptChunks(conversation.conversationId);
+  }
+
   async endConversation(conversationId: string, options: EndConversationOptions = {}): Promise<EndConversationResult> {
     const conversation = await this.getConversation(conversationId);
     const endedAt = conversation.endedAt ?? this.nowIso();
@@ -220,6 +226,7 @@ export class ConversationService {
       status: "ENDED",
       endedAt,
       summaryStatus: conversation.summaryStatus === "READY" ? "READY" : "PENDING",
+      ...(options.usedPrenote ? { usedPrenote: options.usedPrenote } : {}),
     });
 
     if (!pending) {

@@ -2,9 +2,9 @@
 
 ## Operational Excellence
 
-CueFlow uses CDK for infrastructure, GitHub Actions for CI/CD, structured logs in handler and worker code, and CloudWatch dashboard and alarms. The README and demo script document setup, validation, and deployment.
+CueFlow uses CDK for infrastructure, GitHub Actions for CI/CD, bundled Lambda handlers/workers, structured logs, and CloudWatch dashboard and alarms. The README and demo script document setup, validation, and deployment.
 
-Trade-off: inline Lambda placeholders keep synth and deploy simple for the infrastructure phase. A later packaging step should wire compiled backend handlers into Lambda assets.
+Trade-off: GitHub Actions deploy is optional because Learner Lab credentials are short-lived. Manual deploy remains the primary course-demo path unless a stable OIDC role is configured.
 
 ## Security
 
@@ -14,7 +14,7 @@ Trade-off: the course MVP does not include a full user identity system. A produc
 
 ## Reliability
 
-Transcript chunks are persisted before AI generation. SQS queues have DLQs. Cue jobs and summary jobs have pending, in-progress, completed, and failed states. Cue records remain fetchable by REST if a WebSocket connection is lost.
+Transcript chunks are persisted before AI generation. SQS queues have DLQs. Cue and summary jobs are retried by Lambda event source mappings. Cue records remain fetchable by REST if a WebSocket connection is lost.
 
 Trade-off: local tests mock AWS services. Cloud integration testing should be added when a stable AWS account is available.
 
@@ -32,6 +32,6 @@ Trade-off: CloudWatch alarms and dashboard add small fixed cost but are useful f
 
 ## Sustainability
 
-Serverless services reduce idle compute. Trigger policy avoids unnecessary AI calls. WebSocket push avoids continuous client polling. S3 lifecycle policies delete old demo transcript data.
+Serverless services reduce idle compute. Trigger policy avoids unnecessary AI calls. WebSocket push avoids continuous client polling. S3 lifecycle policies delete old demo transcript data. Live cues use a lower-cost OpenAI model than post-session summaries.
 
-Trade-off: deterministic mock AI reduces demo resource use but does not measure real model energy or latency behavior.
+Trade-off: the deployed demo uses OpenAI, so energy and latency depend on external provider behavior. Deterministic mock AI remains only for local unit tests.

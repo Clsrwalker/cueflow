@@ -34,7 +34,7 @@ describe("WebSocket handler", () => {
 
     const connect = await handler({
       requestContext: { routeKey: "$connect", connectionId: "conn_001" },
-      queryStringParameters: { conversationId: conversation.conversationId },
+      queryStringParameters: { conversationId: conversation.conversationId, userId: "user_a" },
     });
     const transcript = await handler({
       requestContext: { routeKey: "sendTranscript", connectionId: "conn_001" },
@@ -82,7 +82,7 @@ describe("WebSocket handler", () => {
     const conversation = await conversations.createConversation();
     await handler({
       requestContext: { routeKey: "$connect", connectionId: "conn_001" },
-      queryStringParameters: { conversationId: conversation.conversationId },
+      queryStringParameters: { conversationId: conversation.conversationId, userId: "demo-user" },
     });
 
     const response = await handler({
@@ -99,7 +99,7 @@ describe("WebSocket handler", () => {
     const conversation = await conversations.createConversation();
     await handler({
       requestContext: { routeKey: "$connect", connectionId: "conn_001" },
-      queryStringParameters: { conversationId: conversation.conversationId },
+      queryStringParameters: { conversationId: conversation.conversationId, userId: "demo-user" },
     });
 
     const invalidJson = await handler({

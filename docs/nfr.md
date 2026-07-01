@@ -3,7 +3,7 @@
 | Target | Goal | Architecture Impact |
 | --- | --- | --- |
 | Transcript ingest latency | p95 under 300 ms | WebSocket handler validates, persists, evaluates trigger policy, and enqueues work without waiting for AI. |
-| Cue generation latency | p95 under 4 seconds, p99 under 8 seconds | SQS worker uses a short transcript context window and deterministic provider for demo reliability. |
+| Cue generation latency | p95 under 4 seconds, p99 under 8 seconds | SQS worker uses a short transcript context window and a lower-cost OpenAI cue model. |
 | Summary latency | p95 under 15 seconds after session end | End request enqueues summary job and returns while summary worker runs independently. |
 | API availability | 99.9 percent target | API Gateway, Lambda, DynamoDB, SQS, and S3 are managed services. |
 | RPO | Under 1 minute | Transcript chunks are persisted before cue generation starts. |

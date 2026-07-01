@@ -12,16 +12,24 @@ function setup() {
   let nextId = 0;
   const store = new InMemoryCueFlowStore();
   const summaryQueue = new InMemorySummaryJobQueue();
+  const transcriptionCalls: unknown[] = [];
+  const transcriber = {
+    async transcribe(input: unknown) {
+      transcriptionCalls.push(input);
+      return { text: "Should we use cloud transcription for the live demo?", model: "mock-transcribe", language: "english" as const };
+    },
+  };
   const service = new ConversationService(store, {
     clock: () => new Date("2026-06-16T10:00:00.000Z"),
     idFactory: () => `${(++nextId).toString().padStart(6, "0")}`,
   });
   const handler = createRestHandler(service, {
     summaryQueue,
+    transcriber,
     clock: () => new Date("2026-06-16T10:00:01.000Z"),
     idFactory: () => `${(++nextId).toString().padStart(6, "0")}`,
   });
-  return { handler, service, store, summaryQueue };
+  return { handler, service, store, summaryQueue, transcriptionCalls };
 }
 
 describe("REST handler", () => {
@@ -43,6 +51,37 @@ describe("REST handler", () => {
     expect(parseBody<{ conversation: { conversationId: string } }>(createResponse).conversation.conversationId).toBe("conv_000001");
     expect(listResponse.statusCode).toBe(200);
     expect(parseBody<{ conversations: Array<{ conversationId: string }> }>(listResponse).conversations).toHaveLength(1);
+  });
+
+  test("transcribes uploaded audio through the configured transcriber", async () => {
+    const { handler, transcriptionCalls } = setup();
+
+    const response = await handler({
+      httpMethod: "POST",
+      path: "/transcribe",
+      body: JSON.stringify({
+        audioBase64: Buffer.from("fake audio").toString("base64"),
+        mimeType: "audio/webm;codecs=opus",
+        language: "english",
+        promptContext: "Prepared context: Demo interview.",
+      }),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(parseBody<{ transcript: string; model: string }>(response)).toEqual({
+      transcript: "Should we use cloud transcription for the live demo?",
+      model: "mock-transcribe",
+      text: "Should we use cloud transcription for the live demo?",
+      language: "english",
+    });
+    expect(transcriptionCalls).toEqual([
+      {
+        audioBase64: Buffer.from("fake audio").toString("base64"),
+        mimeType: "audio/webm;codecs=opus",
+        language: "english",
+        promptContext: "Prepared context: Demo interview.",
+      },
+    ]);
   });
 
   test("returns conversation details, cues, and final summary", async () => {
@@ -115,6 +154,25 @@ describe("REST handler", () => {
     expect(parseBody<{ error: { code: string } }>(missing).error.code).toBe("CONVERSATION_NOT_FOUND");
     expect(unknown.statusCode).toBe(404);
     expect(parseBody<{ error: { code: string } }>(unknown).error.code).toBe("ROUTE_NOT_FOUND");
+  });
+
+  test("hides conversation details from non-owners", async () => {
+    const { handler, service } = setup();
+    const conversation = await service.createConversation({ userId: "user_a" });
+
+    const detailResponse = await handler({
+      httpMethod: "GET",
+      path: `/conversations/${conversation.conversationId}`,
+      headers: { "x-cueflow-user-id": "user_b" },
+    });
+    const cuesResponse = await handler({
+      httpMethod: "GET",
+      path: `/conversations/${conversation.conversationId}/cues`,
+      headers: { "x-cueflow-user-id": "user_b" },
+    });
+
+    expect(detailResponse.statusCode).toBe(404);
+    expect(cuesResponse.statusCode).toBe(404);
   });
 
   test("keeps the demo replay endpoint explicit until the scripted replay is added", async () => {

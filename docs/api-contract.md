@@ -34,6 +34,10 @@ Returns conversation metadata.
 
 Returns saved cue cards for a conversation.
 
+`GET /conversations/{conversationId}/transcript`
+
+Returns transcript chunk metadata for a conversation. Raw chunk payloads and full transcript objects are stored in S3; this route returns the queryable metadata needed by the UI.
+
 `POST /conversations/{conversationId}/end`
 
 Marks the conversation ended, stores the full transcript object, and enqueues summary generation.

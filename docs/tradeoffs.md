@@ -40,13 +40,13 @@ Why: full transcripts can grow and are cheaper to keep as objects. Metadata rema
 
 Risk: two stores must remain consistent. CueFlow writes chunk metadata and raw objects before AI work.
 
-## Mock AI Provider vs OpenAI API
+## OpenAI Provider vs Deterministic Mock
 
-Decision: keep deterministic mock AI as the default local demo provider and support an optional OpenAI provider through environment configuration.
+Decision: use OpenAI for deployed cue and summary workers while keeping deterministic mock AI for unit tests and local fallback.
 
-Why: the demo runs without external keys and produces stable results for grading, while the backend can use the OpenAI API when `OPENAI_API_KEY` is configured.
+Why: the deployed demo must show real AI behavior. The mock provider keeps domain and worker tests stable without spending model tokens or requiring network access.
 
-Risk: OpenAI calls add latency, cost, and key-management requirements. CueFlow keeps provider selection isolated behind the AI interface.
+Risk: OpenAI calls add latency, cost, and key-management requirements. CueFlow stores the key in Secrets Manager and keeps provider selection isolated behind the AI interface.
 
 ## Serverless Cost Optimization vs Runtime Control
 

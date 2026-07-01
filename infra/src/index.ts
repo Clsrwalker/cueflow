@@ -1,5 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
@@ -8,15 +10,20 @@ import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as eventSources from "aws-cdk-lib/aws-lambda-event-sources";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 
+const infraDir = path.dirname(fileURLToPath(import.meta.url));
+const backendLambdaAssetPath = path.join(infraDir, "../../backend/dist/lambda");
+
 const app = new cdk.App();
 app.node.setContext("@aws-cdk/core:defaultCrossStackReferences", "strong");
 const stage = app.node.tryGetContext("stage") ?? "dev";
 const bootstrapless = app.node.tryGetContext("bootstrapless") === "true";
+const disableAutoDeleteObjects = app.node.tryGetContext("disableAutoDeleteObjects") === "true";
 const labRoleArn = app.node.tryGetContext("labRoleArn") as string | undefined;
 const skipFrontend = app.node.tryGetContext("skipFrontend") === "true";
 const frontendMode = (app.node.tryGetContext("frontendMode") ?? "cloudfront") as "cloudfront" | "s3-website" | "api-static";
@@ -25,6 +32,8 @@ if (!["cloudfront", "s3-website", "api-static"].includes(frontendMode)) {
 }
 const openAiSecretId =
   (app.node.tryGetContext("openAiSecretId") as string | undefined) ?? process.env.OPENAI_SECRET_ID ?? `cueflow/${stage}/openai-api-key`;
+const lambdaAssetBucket = app.node.tryGetContext("lambdaAssetBucket") as string | undefined;
+const lambdaAssetKey = app.node.tryGetContext("lambdaAssetKey") as string | undefined;
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
   region: process.env.CDK_DEFAULT_REGION ?? "us-east-1",
@@ -42,6 +51,8 @@ type FrontendHostingStackProps = CueFlowStackProps & {
   lambdaRoleArn?: string;
   openAiSecretId?: string;
   tableName?: string;
+  restHandler?: lambda.IFunction;
+  webSocketUrl?: string;
 };
 
 class StorageStack extends cdk.Stack {
@@ -215,6 +226,7 @@ class FrontendHostingStack extends cdk.Stack {
         environment: {
           FRONTEND_BUCKET_NAME: this.frontendBucket.bucketName,
           FRONTEND_REGION: cdk.Stack.of(this).region,
+          CUEFLOW_WS_URL: props.webSocketUrl ?? "",
         },
         code: lambda.Code.fromInline(`
 const CONTENT_TYPES = {
@@ -227,6 +239,17 @@ const CONTENT_TYPES = {
 
 exports.handler = async (event) => {
   const rawPath = event.rawPath || "/";
+  if (rawPath === "/runtime-config.json") {
+    return {
+      statusCode: 200,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+      body: JSON.stringify({
+        apiBase: "",
+        webSocketUrl: process.env.CUEFLOW_WS_URL || "",
+      }),
+    };
+  }
+
   let key = decodeURIComponent(rawPath).replace(/^\\/+/, "");
   if (!key || key.endsWith("/")) {
     key = key + "index.html";
@@ -290,7 +313,7 @@ function contentType(key) {
         environment: {
           OPENAI_SECRET_ID: aiProxyOpenAiSecretId,
           OPENAI_MODEL: process.env.OPENAI_MODEL ?? "gpt-5.4-nano",
-          OPENAI_SUMMARY_MODEL: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-5.5",
+          OPENAI_SUMMARY_MODEL: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-5.4-mini",
         },
         code: lambda.Code.fromInline(`
 const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
@@ -477,7 +500,7 @@ async function generateJson(task, prompt, apiKey) {
 
   const requestBody = {
     model: isSummary
-      ? process.env.OPENAI_SUMMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5.5"
+      ? process.env.OPENAI_SUMMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5.4-mini"
       : process.env.OPENAI_MODEL || "gpt-5.4-nano",
     input: [
       {
@@ -907,6 +930,9 @@ function json(statusCode, payload) {
       const frontendIntegration = new integrations.HttpLambdaIntegration("FrontendAssetIntegration", this.assetServer);
       const aiProxyIntegration = new integrations.HttpLambdaIntegration("AiProxyIntegration", this.aiProxy);
       const prenoteApiIntegration = new integrations.HttpLambdaIntegration("PrenoteApiIntegration", this.prenoteApi);
+      const restApiIntegration = props.restHandler
+        ? new integrations.HttpLambdaIntegration("ConversationRestIntegration", props.restHandler)
+        : undefined;
       this.httpsApi = new apigwv2.HttpApi(this, "FrontendHttpsApi", {
         apiName: `cueflow-frontend-${props.stage}`,
       });
@@ -916,6 +942,15 @@ function json(statusCode, payload) {
       this.httpsApi.addRoutes({ path: "/ai/summary", methods: [apigwv2.HttpMethod.POST], integration: aiProxyIntegration });
       this.httpsApi.addRoutes({ path: "/prenotes", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: prenoteApiIntegration });
       this.httpsApi.addRoutes({ path: "/prenotes/{noteId}", methods: [apigwv2.HttpMethod.PUT, apigwv2.HttpMethod.DELETE, apigwv2.HttpMethod.OPTIONS], integration: prenoteApiIntegration });
+      if (restApiIntegration) {
+        this.httpsApi.addRoutes({ path: "/transcribe", methods: [apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
+        this.httpsApi.addRoutes({ path: "/conversations", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
+        this.httpsApi.addRoutes({ path: "/conversations/{conversationId}", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
+        this.httpsApi.addRoutes({ path: "/conversations/{conversationId}/transcript", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
+        this.httpsApi.addRoutes({ path: "/conversations/{conversationId}/cues", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
+        this.httpsApi.addRoutes({ path: "/conversations/{conversationId}/end", methods: [apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
+        this.httpsApi.addRoutes({ path: "/conversations/{conversationId}/summary", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
+      }
     }
 
     new cdk.CfnOutput(this, "FrontendBucketName", { value: this.frontendBucket.bucketName });
@@ -935,6 +970,9 @@ type ApiStackProps = CueFlowStackProps & {
   cueQueue: sqs.Queue;
   summaryQueue: sqs.Queue;
   lambdaRoleArn?: string;
+  openAiSecretId?: string;
+  lambdaAssetBucket?: string;
+  lambdaAssetKey?: string;
 };
 
 class ApiStack extends cdk.Stack {
@@ -945,9 +983,13 @@ class ApiStack extends cdk.Stack {
   readonly webSocketHandler: lambda.Function;
   readonly cueWorker: lambda.Function;
   readonly summaryWorker: lambda.Function;
+  private readonly lambdaAssetBucket?: string;
+  private readonly lambdaAssetKey?: string;
 
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
+    this.lambdaAssetBucket = props.lambdaAssetBucket;
+    this.lambdaAssetKey = props.lambdaAssetKey;
 
     const baseEnvironment = {
       CUEFLOW_STAGE: props.stage,
@@ -955,8 +997,11 @@ class ApiStack extends cdk.Stack {
       CUEFLOW_DATA_BUCKET_NAME: props.dataBucket.bucketName,
       CUEFLOW_CUE_QUEUE_URL: props.cueQueue.queueUrl,
       CUEFLOW_SUMMARY_QUEUE_URL: props.summaryQueue.queueUrl,
-      CUEFLOW_AI_PROVIDER: process.env.CUEFLOW_AI_PROVIDER ?? "mock",
-      OPENAI_MODEL: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
+      CUEFLOW_AI_PROVIDER: process.env.CUEFLOW_AI_PROVIDER ?? "openai",
+      OPENAI_SECRET_ID: props.openAiSecretId ?? `cueflow/${props.stage}/openai-api-key`,
+      OPENAI_MODEL: process.env.OPENAI_MODEL ?? "gpt-5.4-nano",
+      OPENAI_SUMMARY_MODEL: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-5.4-mini",
+      OPENAI_TRANSCRIPTION_MODEL: process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe",
       NODE_OPTIONS: "--enable-source-maps",
     };
 
@@ -964,10 +1009,10 @@ class ApiStack extends cdk.Stack {
       ? iam.Role.fromRoleArn(this, "LearnerLabLambdaRole", props.lambdaRoleArn, { mutable: false })
       : undefined;
 
-    this.restHandler = this.lambdaFunction("RestHandler", "rest-handler", baseEnvironment, lambdaRole);
-    this.webSocketHandler = this.lambdaFunction("WebSocketHandler", "websocket-handler", baseEnvironment, lambdaRole);
-    this.cueWorker = this.lambdaFunction("CueWorker", "cue-worker", baseEnvironment, lambdaRole);
-    this.summaryWorker = this.lambdaFunction("SummaryWorker", "summary-worker", baseEnvironment, lambdaRole);
+    this.restHandler = this.lambdaFunction("RestHandler", "rest-handler", "rest-handler.handler", baseEnvironment, lambdaRole);
+    this.webSocketHandler = this.lambdaFunction("WebSocketHandler", "websocket-handler", "websocket-handler.handler", baseEnvironment, lambdaRole);
+    this.cueWorker = this.lambdaFunction("CueWorker", "cue-worker", "cue-worker-handler.handler", baseEnvironment, lambdaRole);
+    this.summaryWorker = this.lambdaFunction("SummaryWorker", "summary-worker", "summary-worker-handler.handler", baseEnvironment, lambdaRole);
 
     if (!lambdaRole) {
       props.table.grantReadWriteData(this.restHandler);
@@ -982,6 +1027,13 @@ class ApiStack extends cdk.Stack {
       props.cueQueue.grantConsumeMessages(this.cueWorker);
       props.summaryQueue.grantSendMessages(this.restHandler);
       props.summaryQueue.grantConsumeMessages(this.summaryWorker);
+      const openAiSecretId = props.openAiSecretId ?? `cueflow/${props.stage}/openai-api-key`;
+      const openAiSecret = openAiSecretId.startsWith("arn:")
+        ? secretsmanager.Secret.fromSecretCompleteArn(this, "ApiOpenAiSecret", openAiSecretId)
+        : secretsmanager.Secret.fromSecretNameV2(this, "ApiOpenAiSecret", openAiSecretId);
+      for (const fn of [this.restHandler, this.webSocketHandler, this.cueWorker, this.summaryWorker]) {
+        openAiSecret.grantRead(fn);
+      }
     }
 
     this.restApi = new apigwv2.HttpApi(this, "RestApi", {
@@ -995,6 +1047,7 @@ class ApiStack extends cdk.Stack {
     });
 
     const restIntegration = new integrations.HttpLambdaIntegration("RestIntegration", this.restHandler);
+    this.restApi.addRoutes({ path: "/transcribe", methods: [apigwv2.HttpMethod.POST], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations/{conversationId}", methods: [apigwv2.HttpMethod.GET], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations/{conversationId}/cues", methods: [apigwv2.HttpMethod.GET], integration: restIntegration });
@@ -1026,6 +1079,12 @@ class ApiStack extends cdk.Stack {
       autoDeploy: true,
     });
 
+    const webSocketManagementEndpoint = `https://${this.webSocketApi.apiId}.execute-api.${cdk.Stack.of(this).region}.${cdk.Stack.of(this).urlSuffix}/${props.stage}`;
+    this.cueWorker.addEnvironment("CUEFLOW_WEBSOCKET_MANAGEMENT_ENDPOINT", webSocketManagementEndpoint);
+    this.summaryWorker.addEnvironment("CUEFLOW_WEBSOCKET_MANAGEMENT_ENDPOINT", webSocketManagementEndpoint);
+    this.cueWorker.addEventSource(new eventSources.SqsEventSource(props.cueQueue, { batchSize: 1 }));
+    this.summaryWorker.addEventSource(new eventSources.SqsEventSource(props.summaryQueue, { batchSize: 1 }));
+
     const manageConnectionsPolicy = new iam.PolicyStatement({
       actions: ["execute-api:ManageConnections"],
       resources: [
@@ -1048,6 +1107,7 @@ class ApiStack extends cdk.Stack {
   private lambdaFunction(
     id: string,
     functionName: string,
+    handler: string,
     environment: Record<string, string>,
     role?: iam.IRole,
   ): lambda.Function {
@@ -1057,30 +1117,23 @@ class ApiStack extends cdk.Stack {
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    const code = this.lambdaAssetBucket && this.lambdaAssetKey
+      ? lambda.Code.fromBucket(
+          s3.Bucket.fromBucketName(this, `${id}CodeBucket`, this.lambdaAssetBucket),
+          this.lambdaAssetKey,
+        )
+      : lambda.Code.fromAsset(backendLambdaAssetPath);
 
     return new lambda.Function(this, id, {
       functionName: physicalName,
       runtime: lambda.Runtime.NODEJS_20_X,
-      handler: "index.handler",
-      memorySize: 256,
-      timeout: cdk.Duration.seconds(20),
+      handler,
+      memorySize: id === "CueWorker" || id === "SummaryWorker" ? 512 : 256,
+      timeout: id === "SummaryWorker" ? cdk.Duration.minutes(2) : cdk.Duration.seconds(30),
       logGroup,
       environment,
       role,
-      code: lambda.Code.fromInline(`
-exports.handler = async (event, context) => {
-  console.log(JSON.stringify({
-    eventName: "${functionName}.invoked",
-    requestId: context.awsRequestId,
-    status: "ok"
-  }));
-  return {
-    statusCode: 200,
-    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
-    body: JSON.stringify({ service: "${functionName}", status: "configured" })
-  };
-};
-`),
+      code,
     });
   }
 }
@@ -1156,20 +1209,11 @@ class MonitoringStack extends cdk.Stack {
 const stackProps: CueFlowStackProps = {
   env,
   stage,
-  autoDeleteObjects: !bootstrapless,
+  autoDeleteObjects: !bootstrapless && !disableAutoDeleteObjects,
   synthesizer: bootstrapless ? new cdk.BootstraplessSynthesizer() : undefined,
 };
 const storage = new StorageStack(app, `CueFlowStorage-${stage}`, stackProps);
 const queues = new QueueStack(app, `CueFlowQueues-${stage}`, stackProps);
-if (!skipFrontend) {
-  new FrontendHostingStack(app, `CueFlowFrontend-${stage}`, {
-    ...stackProps,
-    mode: frontendMode,
-    lambdaRoleArn: labRoleArn,
-    openAiSecretId,
-    tableName: `CueFlowTable-${stage}`,
-  });
-}
 const api = new ApiStack(app, `CueFlowApi-${stage}`, {
   ...stackProps,
   table: storage.table,
@@ -1177,7 +1221,21 @@ const api = new ApiStack(app, `CueFlowApi-${stage}`, {
   cueQueue: queues.cueQueue,
   summaryQueue: queues.summaryQueue,
   lambdaRoleArn: labRoleArn,
+  openAiSecretId,
+  lambdaAssetBucket,
+  lambdaAssetKey,
 });
+if (!skipFrontend) {
+  new FrontendHostingStack(app, `CueFlowFrontend-${stage}`, {
+    ...stackProps,
+    mode: frontendMode,
+    lambdaRoleArn: labRoleArn,
+    openAiSecretId,
+    tableName: `CueFlowTable-${stage}`,
+    restHandler: api.restHandler,
+    webSocketUrl: api.webSocketStage.url,
+  });
+}
 new MonitoringStack(app, `CueFlowMonitoring-${stage}`, {
   ...stackProps,
   apiStack: api,

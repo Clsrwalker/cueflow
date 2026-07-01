@@ -1,7 +1,12 @@
 import type { TranscriptChunk } from "@cueflow/shared";
 
 export const TRIGGER_WORD_THRESHOLD = 60;
-export const TRIGGER_COOLDOWN_MS = 20_000;
+export const TRIGGER_COOLDOWN_MS = 8_000;
+export const TRIGGER_QUESTION_COOLDOWN_MS = 1_500;
+export const TRIGGER_AI_REVIEW_COOLDOWN_MS = 2_500;
+export const TRIGGER_AI_REVIEW_MIN_WORDS = 3;
+export const TRIGGER_MIN_WORDS_AFTER_COOLDOWN = 8;
+export const TRIGGER_MAX_CUES_PER_MINUTE = 8;
 
 export const DECISION_AND_RISK_KEYWORDS = [
   "choose",
@@ -9,25 +14,80 @@ export const DECISION_AND_RISK_KEYWORDS = [
   "trade-off",
   "tradeoff",
   "should we",
+  "should i",
+  "recommend",
+  "suggest",
+  "next step",
+  "action item",
+  "confidence threshold",
+  "duplicate",
+  "explain",
   "risk",
+  "fail",
+  "fails",
   "issue",
   "problem",
   "alternative",
+  "persist",
+  "data loss",
   "latency",
   "failure",
   "cost",
   "security",
   "reliability",
+  "问题",
+  "风险",
+  "应该",
+  "选择",
+  "建议",
+  "下一步",
+  "怎么",
+  "如何",
+  "失败",
+  "成本",
+  "安全",
+  "可靠",
+  "方案",
+  "替代",
 ] as const;
 
-export type CueTriggerReason = "WORD_THRESHOLD" | "TIME_THRESHOLD" | "QUESTION" | "KEYWORD";
+const LIVE_INTENT_KEYWORDS = [
+  "question",
+  "stuck",
+  "confused",
+  "explain",
+  "clarify",
+  "help",
+  "how do",
+  "how should",
+  "what should",
+  "why does",
+  "\u95EE\u9898",
+  "\u98CE\u9669",
+  "\u5E94\u8BE5",
+  "\u9009\u62E9",
+  "\u5EFA\u8BAE",
+  "\u4E0B\u4E00\u6B65",
+  "\u600E\u4E48",
+  "\u5982\u4F55",
+  "\u4E3A\u4EC0\u4E48",
+  "\u89E3\u91CA",
+  "\u53EF\u4EE5\u5417",
+  "\u80FD\u4E0D\u80FD",
+] as const;
+
+export type CueTriggerReason = "WORD_THRESHOLD" | "TIME_THRESHOLD" | "QUESTION" | "KEYWORD" | "AI_REVIEW";
+export type CueSuppressionReason = "AUTO_CUE_OFF" | "PENDING_JOB" | "EMPTY_TEXT" | "COOLDOWN" | "RATE_LIMITED" | "LOW_SIGNAL";
 
 export type CueTriggerInput = {
   conversationId: string;
   chunksSinceLastCue: TranscriptChunk[];
   lastCueCreatedAt?: string | null;
+  recentCueCreatedAts?: string[];
   now?: string | Date;
   pendingCueJob?: boolean;
+  autoCue?: boolean;
+  maxCuesPerMinute?: number;
 };
 
 export type CueTriggerEvaluation = {
@@ -37,6 +97,8 @@ export type CueTriggerEvaluation = {
   sourceChunkStart: string | null;
   sourceChunkEnd: string | null;
   triggerWindowId: string | null;
+  suppressionReason: CueSuppressionReason | null;
+  cooldownRemainingMs: number;
 };
 
 function joinedText(chunks: TranscriptChunk[]): string {
@@ -45,63 +107,164 @@ function joinedText(chunks: TranscriptChunk[]): string {
 
 function wordCount(value: string): number {
   const words = value.match(/[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g);
-  return words?.length ?? 0;
+  const cjkChars = value.match(/[\u3400-\u9fff]/g);
+  return (words?.length ?? 0) + Math.ceil((cjkChars?.length ?? 0) / 2);
+}
+
+function nowTimeMs(input: CueTriggerInput): number {
+  const nowTime = input.now instanceof Date
+    ? input.now.getTime()
+    : Date.parse(input.now ?? new Date().toISOString());
+  return Number.isFinite(nowTime) ? nowTime : Date.now();
 }
 
 function elapsedSinceLastCueMs(input: CueTriggerInput): number | null {
   if (!input.lastCueCreatedAt) return null;
   const lastCueTime = Date.parse(input.lastCueCreatedAt);
-  const nowTime = input.now instanceof Date
-    ? input.now.getTime()
-    : Date.parse(input.now ?? new Date().toISOString());
-  if (!Number.isFinite(lastCueTime) || !Number.isFinite(nowTime)) return null;
-  return Math.max(0, nowTime - lastCueTime);
+  if (!Number.isFinite(lastCueTime)) return null;
+  return Math.max(0, nowTimeMs(input) - lastCueTime);
 }
 
 function hasQuestion(text: string): boolean {
   return /[?？]/.test(text);
 }
 
+function hasSpokenQuestion(text: string): boolean {
+  return /\b(what|why|how|when|where|who|which|what about|do you think|tell me|help me)\b/i.test(text)
+    || /\b(can|could|would|should)\s+(we|i|you|this|that|it|there|the|our)\b/i.test(text)
+    || /\b(do we|does this|is this|are we|is there|are there)\b/i.test(text)
+    || /(什么|为什么|怎么|如何|是否|是不是|有没有|能不能|能否|可以吗|可不可以|要不要|哪一个|怎么办|有什么|应该怎么|问题在哪|哪里有问题)/.test(text);
+}
+
+function hasLiveIntent(text: string): boolean {
+  const lower = text.toLowerCase();
+  return /[?\uFF1F]/.test(text)
+    || LIVE_INTENT_KEYWORDS.some((keyword) => lower.includes(keyword.toLowerCase()));
+}
+
 function hasDecisionOrRiskKeyword(text: string): boolean {
   const lower = text.toLowerCase();
-  return DECISION_AND_RISK_KEYWORDS.some((keyword) => lower.includes(keyword));
+  return DECISION_AND_RISK_KEYWORDS.some((keyword) => lower.includes(keyword))
+    || LIVE_INTENT_KEYWORDS.some((keyword) => lower.includes(keyword.toLowerCase()));
+}
+
+function isLowValueAudioCheck(text: string, count: number): boolean {
+  if (count > 14) return false;
+  return /\b(can you hear me|hear me okay|can you see|microphone|mic check|audio check|testing|hello|hi)\b/i.test(text)
+    && !hasDecisionOrRiskKeyword(text);
+}
+
+function isLowValueFiller(text: string, count: number): boolean {
+  if (hasLiveIntent(text) || hasDecisionOrRiskKeyword(text)) return false;
+  if (count > 5) return false;
+  return /\b(okay|ok|sounds good|that sounds good|sure|yeah|yes|no|thanks|thank you|got it|right|fine|cool|great)\b/i.test(text);
+}
+
+function shouldAskAiToReview(text: string, count: number): boolean {
+  if (count < TRIGGER_AI_REVIEW_MIN_WORDS) return false;
+  return /\p{L}|\p{N}/u.test(text);
+}
+
+function recentCueCount(input: CueTriggerInput): number {
+  const now = nowTimeMs(input);
+  const candidates = input.recentCueCreatedAts?.length
+    ? input.recentCueCreatedAts
+    : input.lastCueCreatedAt
+      ? [input.lastCueCreatedAt]
+      : [];
+  return candidates.filter((createdAt) => {
+    const time = Date.parse(createdAt);
+    return Number.isFinite(time) && now - time >= 0 && now - time < 60_000;
+  }).length;
+}
+
+function triggerWindowId(input: CueTriggerInput, start: string | null, end: string | null, count: number): string | null {
+  return start && end ? `${input.conversationId}:${start}:${end}:${count}` : null;
+}
+
+function suppressed(
+  reason: CueSuppressionReason,
+  partial: Omit<CueTriggerEvaluation, "shouldEnqueue" | "suppressionReason" | "cooldownRemainingMs">,
+  cooldownRemainingMs = 0,
+): CueTriggerEvaluation {
+  return {
+    ...partial,
+    shouldEnqueue: false,
+    suppressionReason: reason,
+    cooldownRemainingMs,
+  };
 }
 
 export function evaluateCueTrigger(input: CueTriggerInput): CueTriggerEvaluation {
   const chunks = input.chunksSinceLastCue;
   const text = joinedText(chunks);
+  const recentText = chunks[chunks.length - 1]?.text.trim() || text;
   const count = wordCount(text);
-  const sourceChunkStart = chunks[0]?.chunkId ?? null;
-  const sourceChunkEnd = chunks[chunks.length - 1]?.chunkId ?? null;
+  const sourceChunks = chunks.slice(-3);
+  const sourceChunkStart = sourceChunks[0]?.chunkId ?? null;
+  const sourceChunkEnd = sourceChunks[sourceChunks.length - 1]?.chunkId ?? null;
+  const base = {
+    reasons: [] as CueTriggerReason[],
+    wordCount: count,
+    sourceChunkStart,
+    sourceChunkEnd,
+    triggerWindowId: null,
+  };
 
-  if (input.pendingCueJob || !chunks.length || !text) {
-    return {
-      shouldEnqueue: false,
-      reasons: [],
-      wordCount: count,
-      sourceChunkStart,
-      sourceChunkEnd,
-      triggerWindowId: null,
-    };
+  if (input.autoCue === false) {
+    return suppressed("AUTO_CUE_OFF", base);
+  }
+
+  if (input.pendingCueJob) {
+    return suppressed("PENDING_JOB", base);
+  }
+
+  if (!chunks.length || !text) {
+    return suppressed("EMPTY_TEXT", base);
+  }
+
+  if (isLowValueAudioCheck(recentText || text, count) || isLowValueFiller(recentText || text, wordCount(recentText || text))) {
+    return suppressed("LOW_SIGNAL", base);
+  }
+
+  const maxCuesPerMinute = input.maxCuesPerMinute ?? TRIGGER_MAX_CUES_PER_MINUTE;
+  if (maxCuesPerMinute > 0 && recentCueCount(input) >= maxCuesPerMinute) {
+    return suppressed("RATE_LIMITED", base);
   }
 
   const reasons: CueTriggerReason[] = [];
   if (count > TRIGGER_WORD_THRESHOLD) reasons.push("WORD_THRESHOLD");
   const elapsedMs = elapsedSinceLastCueMs(input);
-  if (elapsedMs !== null && elapsedMs > TRIGGER_COOLDOWN_MS) reasons.push("TIME_THRESHOLD");
-  if (hasQuestion(text)) reasons.push("QUESTION");
-  if (hasDecisionOrRiskKeyword(text)) reasons.push("KEYWORD");
+  if (elapsedMs !== null && elapsedMs > TRIGGER_COOLDOWN_MS && count >= TRIGGER_MIN_WORDS_AFTER_COOLDOWN) {
+    reasons.push("TIME_THRESHOLD");
+  }
+  if (hasQuestion(recentText) || hasSpokenQuestion(recentText) || hasLiveIntent(recentText)) reasons.push("QUESTION");
+  if (hasDecisionOrRiskKeyword(recentText)) reasons.push("KEYWORD");
+  if (!reasons.length && shouldAskAiToReview(recentText, wordCount(recentText))) {
+    reasons.push("AI_REVIEW");
+  }
 
-  const shouldEnqueue = reasons.length > 0;
+  if (!reasons.length) {
+    return suppressed("LOW_SIGNAL", { ...base, reasons });
+  }
+
+  const cooldownMs = reasons.includes("QUESTION")
+    ? TRIGGER_QUESTION_COOLDOWN_MS
+    : reasons.includes("AI_REVIEW")
+      ? TRIGGER_AI_REVIEW_COOLDOWN_MS
+      : TRIGGER_COOLDOWN_MS;
+  if (elapsedMs !== null && elapsedMs < cooldownMs) {
+    return suppressed("COOLDOWN", { ...base, reasons }, cooldownMs - elapsedMs);
+  }
+
   return {
-    shouldEnqueue,
+    shouldEnqueue: true,
     reasons,
     wordCount: count,
     sourceChunkStart,
     sourceChunkEnd,
-    triggerWindowId: shouldEnqueue && sourceChunkStart && sourceChunkEnd
-      ? `${input.conversationId}:${sourceChunkStart}:${sourceChunkEnd}:${count}`
-      : null,
+    triggerWindowId: triggerWindowId(input, sourceChunkStart, sourceChunkEnd, count),
+    suppressionReason: null,
+    cooldownRemainingMs: 0,
   };
 }
-

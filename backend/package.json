@@ -6,11 +6,19 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "dependencies": {
+    "@aws-sdk/client-apigatewaymanagementapi": "^3.1076.0",
+    "@aws-sdk/client-dynamodb": "^3.1076.0",
+    "@aws-sdk/client-s3": "^3.1076.0",
+    "@aws-sdk/client-secrets-manager": "^3.1076.0",
+    "@aws-sdk/client-sqs": "^3.1076.0",
+    "@aws-sdk/util-dynamodb": "^3.996.5",
     "@cueflow/shared": "0.1.0",
+    "esbuild": "^0.28.1",
     "openai": "^6.45.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/clean-lambda-tsc-output.mjs",
+    "build:lambdas": "npm run build && node scripts/build-lambdas.mjs",
     "test": "npm run build --workspace @cueflow/shared && vitest run",
     "typecheck": "npm run build --workspace @cueflow/shared && tsc -p tsconfig.json --noEmit"
   }

@@ -6,25 +6,25 @@ Target length: 10 minutes.
 
 Open the README and explain CueFlow as a mobile-first cloud-native conversation intelligence MVP. Point out the tiers: React client, REST API, WebSocket API, Lambda workers, SQS, DynamoDB, S3, CloudWatch, CDK, and CI.
 
-## 1:00 - 3:00 Local App Demo
+## 1:00 - 3:00 Cloud App Demo
 
-Run:
+Open the deployed HTTPS frontend URL. If running locally, provide:
 
 ```bash
-npm install
+VITE_CUEFLOW_API_BASE=<https api url>
+VITE_CUEFLOW_WS_URL=<wss api url>
 npm run dev --workspace @cueflow/frontend
 ```
 
-Open `http://localhost:5174`.
-
 Click:
 1. Review the Sessions home page, My Records list, and Prepared Notes dock.
-2. Start a new session.
-3. Allow microphone access and speak.
-4. Open the Transcript tab and watch live speech text arrive.
-5. Open the AI Summary tab and watch cue cards appear as the session develops.
-6. End the conversation.
-7. Review the saved summary, transcript, and cue history.
+2. Add or select a Prepared Note.
+3. Start a new session.
+4. Allow microphone access and speak a question such as "How should we explain the CueFlow cloud architecture risk?"
+5. Watch Transcript update while WebSocket sends final chunks to the backend.
+6. Watch AI cues appear from the SQS worker/OpenAI path.
+7. End the conversation.
+8. Review the persisted summary, transcript, and cue history from My Records.
 
 ## 3:00 - 5:00 Backend Design
 
@@ -33,7 +33,7 @@ Show backend tests and code structure:
 - WebSocket transcript flow.
 - Queue abstractions.
 - Cue worker and summary worker.
-- Mock AI provider.
+- OpenAI provider plus deterministic mock provider for tests.
 
 Run:
 
@@ -51,6 +51,7 @@ Explain:
 - SQS queues and DLQs.
 - API Gateway HTTP and WebSocket APIs.
 - Lambda handlers and workers.
+- Secrets Manager OpenAI key.
 - CloudFront/S3 frontend hosting.
 - CloudWatch dashboard and alarms.
 
@@ -67,7 +68,7 @@ Open `docs/tradeoffs.md` and discuss:
 - Synchronous AI vs SQS worker.
 - Lambda vs container service.
 - DynamoDB vs relational database.
-- Mock provider vs external LLM.
+- OpenAI provider vs deterministic mock tests.
 
 ## 8:30 - 10:00 Well-Architected Summary
 

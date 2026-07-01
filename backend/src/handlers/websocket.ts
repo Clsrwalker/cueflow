@@ -11,7 +11,9 @@ export type WebSocketRequest = {
   queryStringParameters?: Record<string, string | undefined> | null;
   requestContext?: {
     connectionId?: string;
+    domainName?: string;
     routeKey?: string;
+    stage?: string;
   };
 };
 

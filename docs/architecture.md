@@ -18,7 +18,7 @@ Application tier:
 - Lambda REST handler for create/list/get/end/summary operations.
 - Lambda WebSocket handler for connect, disconnect, sendTranscript, ping, and clientAckCue routes.
 - SQS-backed cue worker and summary worker.
-- AI provider abstraction with deterministic mock implementation for the course demo and optional OpenAI API provider for real model-backed cue and summary generation.
+- AI provider abstraction. The deployed path uses OpenAI through Lambda/worker code with the key read from Secrets Manager; deterministic mock AI remains available for local unit tests.
 
 Data tier:
 - DynamoDB single-table metadata model for conversations, transcript chunk metadata, cues, and WebSocket connection state.
@@ -49,7 +49,7 @@ Transcript ingest:
 Cue generation:
 1. SQS delivers a cue job to the cue worker.
 2. Worker loads recent transcript context.
-3. Worker calls the mock AI provider.
+3. Worker calls the configured AI provider.
 4. Worker validates and stores the cue.
 5. Worker pushes `cue.created` to active WebSocket connections.
 
@@ -67,3 +67,77 @@ Metadata stays in DynamoDB for fast access by conversation id and user history. 
 ## Stateless Compute
 
 Lambda functions do not rely on process memory for persistent state. Local in-memory stores exist only for deterministic tests and the local demo. In AWS, persistent state belongs in DynamoDB, S3, and SQS.
+
+## High-Level Architecture Diagram
+
+```mermaid
+flowchart LR
+  Browser[Mobile-first React client]
+  HttpApi[API Gateway HTTP API]
+  WsApi[API Gateway WebSocket API]
+  RestLambda[REST Lambda]
+  WsLambda[WebSocket Lambda]
+  CueQueue[SQS cue queue]
+  SummaryQueue[SQS summary queue]
+  CueWorker[Cue worker Lambda]
+  SummaryWorker[Summary worker Lambda]
+  Ddb[(DynamoDB metadata)]
+  S3[(S3 transcript and summary objects)]
+  Secrets[Secrets Manager OpenAI key]
+  OpenAI[OpenAI Responses API]
+  CloudWatch[CloudWatch logs dashboard alarms]
+
+  Browser -->|REST create/list/end/history| HttpApi --> RestLambda
+  Browser <-->|sendTranscript / cue events| WsApi --> WsLambda
+  RestLambda --> Ddb
+  RestLambda --> S3
+  RestLambda --> SummaryQueue
+  WsLambda --> Ddb
+  WsLambda --> S3
+  WsLambda --> CueQueue
+  CueQueue --> CueWorker
+  SummaryQueue --> SummaryWorker
+  CueWorker --> Ddb
+  CueWorker --> Secrets
+  CueWorker --> OpenAI
+  CueWorker -->|cue.created| WsApi
+  SummaryWorker --> Ddb
+  SummaryWorker --> S3
+  SummaryWorker --> Secrets
+  SummaryWorker --> OpenAI
+  SummaryWorker -->|summary.ready| WsApi
+  RestLambda --> CloudWatch
+  WsLambda --> CloudWatch
+  CueWorker --> CloudWatch
+  SummaryWorker --> CloudWatch
+```
+
+## WebSocket Transcript-To-Cue Sequence
+
+```mermaid
+sequenceDiagram
+  participant Client as Browser client
+  participant WS as API Gateway WebSocket
+  participant WSL as WebSocket Lambda
+  participant DDB as DynamoDB
+  participant S3 as S3
+  participant SQS as SQS cue queue
+  participant Worker as Cue worker Lambda
+  participant AI as OpenAI
+
+  Client->>WS: connect?conversationId&userId
+  WS->>WSL: $connect
+  WSL->>DDB: put connection record
+  Client->>WS: sendTranscript chunk
+  WS->>WSL: route sendTranscript
+  WSL->>S3: put raw transcript chunk
+  WSL->>DDB: put transcript metadata
+  WSL->>SQS: enqueue cue job when trigger fires
+  WSL-->>Client: transcript.ack
+  SQS->>Worker: deliver cue job
+  Worker->>DDB: load recent transcript metadata
+  Worker->>AI: generate cue with prepared note context
+  Worker->>DDB: put cue metadata
+  Worker->>WS: postToConnection cue.created
+  WS-->>Client: cue.created
+```

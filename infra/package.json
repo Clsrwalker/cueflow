@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "synth": "npm run build && cdk synth --app \"node dist/index.js\"",
+    "synth": "npm run build:lambdas --workspace @cueflow/backend && npm run build && cdk synth --app \"node dist/index.js\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

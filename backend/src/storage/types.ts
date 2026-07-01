@@ -1,6 +1,8 @@
-import type { Conversation, ConversationSummary, Cue, TranscriptChunk, WebSocketConnection } from "@cueflow/shared";
+import type { Conversation, ConversationSummary, Cue, TranscriptChunk, UsedPrenote, WebSocketConnection } from "@cueflow/shared";
 
-export type ConversationPatch = Partial<Pick<Conversation, "status" | "endedAt" | "cueCount" | "summaryStatus">>;
+export type ConversationPatch = Partial<Pick<Conversation, "status" | "endedAt" | "cueCount" | "summaryStatus">> & {
+  usedPrenote?: UsedPrenote;
+};
 
 export type MetadataStore = {
   createConversation(conversation: Conversation): Promise<Conversation>;

@@ -44,9 +44,20 @@ export {
 
 export {
   DEFAULT_OPENAI_MODEL,
+  DEFAULT_OPENAI_SUMMARY_MODEL,
   OpenAiProvider,
   type OpenAiProviderOptions,
 } from "./ai/openai-provider.js";
+
+export {
+  DEFAULT_OPENAI_TRANSCRIPTION_MODEL,
+  OpenAiTranscriptionProvider,
+  type AudioTranscriber,
+  type AudioTranscriptionInput,
+  type AudioTranscriptionResult,
+  type OpenAiTranscriptionProviderOptions,
+  type TranscriptionLanguage,
+} from "./ai/transcription-provider.js";
 
 export {
   aiProviderNameFromEnv,

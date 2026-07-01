@@ -25,6 +25,7 @@ describe("OpenAiProvider", () => {
         shortText: "Use WebSocket for live cue delivery.",
         detailText: "REST remains useful for history and summary retrieval.",
         confidence: 1.2,
+        reason: "clear architecture decision",
       })),
     });
 
@@ -41,6 +42,61 @@ describe("OpenAiProvider", () => {
       sourceChunkStart: "000001",
       sourceChunkEnd: "000001",
       confidence: 1,
+    });
+  });
+
+  test("returns a skipped cue result when the model chooses NONE", async () => {
+    const provider = new OpenAiProvider({
+      client: fakeClient(JSON.stringify({
+        type: "NONE",
+        title: "",
+        shortText: "",
+        detailText: "",
+        confidence: 0.18,
+        reason: "short filler without useful context",
+      })),
+    });
+
+    const cue = await provider.generateCue({
+      conversationId: "conv_001",
+      chunks: [
+        chunk({ conversationId: "conv_001", chunkId: "000001", text: "Okay, sounds good." }),
+      ],
+    });
+
+    expect(cue).toMatchObject({
+      display: false,
+      skipReason: "short filler without useful context",
+      sourceChunkStart: "000001",
+      sourceChunkEnd: "000001",
+      confidence: 0.18,
+    });
+  });
+
+  test("compacts cue titles that repeat the cue content", async () => {
+    const repeated = "Use SQS worker queues to process AI cue jobs asynchronously.";
+    const provider = new OpenAiProvider({
+      client: fakeClient(JSON.stringify({
+        type: "ACTION",
+        title: repeated,
+        shortText: repeated,
+        detailText: "Use SQS worker queues to process AI cue jobs asynchronously so transcript ingestion stays responsive.",
+        confidence: 0.82,
+        reason: "clear implementation step",
+      })),
+    });
+
+    const cue = await provider.generateCue({
+      conversationId: "conv_001",
+      chunks: [
+        chunk({ conversationId: "conv_001", chunkId: "000001", text: "How should I process cue jobs without blocking transcript ingestion?" }),
+      ],
+    });
+
+    expect(cue).toMatchObject({
+      type: "ACTION",
+      title: "Next step",
+      shortText: repeated,
     });
   });
 
@@ -83,6 +139,7 @@ describe("OpenAiProvider", () => {
         shortText: "Use the rubric context.",
         detailText: "Tie the cue to the selected prepared note.",
         confidence: 0.8,
+        reason: "prepared context is directly relevant",
       }), calls),
     });
 

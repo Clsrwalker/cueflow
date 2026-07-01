@@ -1,15 +1,20 @@
+import type { Conversation, UsedPrenote } from "@cueflow/shared";
 import type { ConversationService } from "../services/conversation-service.js";
 import {
+  ConversationNotFoundError,
   ConversationServiceError,
+  DEFAULT_USER_ID,
   InvalidConversationInputError,
 } from "../services/conversation-service.js";
 import type { SummaryJobQueue } from "../queues/types.js";
+import type { AudioTranscriber, TranscriptionLanguage } from "../ai/transcription-provider.js";
 
 type Clock = () => Date;
 type IdFactory = () => string;
 
 export type RestHandlerOptions = {
   summaryQueue?: SummaryJobQueue;
+  transcriber?: AudioTranscriber;
   clock?: Clock;
   idFactory?: IdFactory;
 };
@@ -46,7 +51,7 @@ type RouteParts = {
 const JSON_HEADERS = {
   "content-type": "application/json",
   "access-control-allow-origin": "*",
-  "access-control-allow-headers": "content-type",
+  "access-control-allow-headers": "content-type,authorization,x-cueflow-user-id",
   "access-control-allow-methods": "GET,POST,OPTIONS",
 };
 
@@ -104,6 +109,78 @@ function optionalString(input: Record<string, unknown>, field: string): string |
   return typeof value === "string" ? value : undefined;
 }
 
+function requireString(input: Record<string, unknown>, field: string, max: number): string {
+  const value = optionalString(input, field)?.trim() ?? "";
+  if (!value) throw new InvalidConversationInputError(`${field} is required.`);
+  return value.slice(0, max);
+}
+
+function cleanString(value: unknown, max: number): string {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
+}
+
+function cleanText(value: unknown, max: number): string {
+  return typeof value === "string" ? value.trim().slice(0, max) : "";
+}
+
+function optionalUsedPrenote(input: Record<string, unknown>): UsedPrenote | undefined {
+  const value = input.usedPrenote;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new InvalidConversationInputError("usedPrenote must be an object.");
+  }
+  const raw = value as Record<string, unknown>;
+  const title = cleanString(raw.title, 160);
+  const text = cleanText(raw.text, 12000);
+  if (!title && !text) {
+    throw new InvalidConversationInputError("usedPrenote title or text is required.");
+  }
+  return {
+    id: cleanString(raw.id, 140) || "used-prenote",
+    title: title || text.slice(0, 80) || "Prepared Note",
+    text: text || title,
+  };
+}
+
+function optionalTranscriptionLanguage(input: Record<string, unknown>): TranscriptionLanguage | undefined {
+  const value = optionalString(input, "language")?.trim().toLowerCase();
+  if (!value) return undefined;
+  if (value === "english" || value === "chinese" || value === "auto") return value;
+  throw new InvalidConversationInputError("language must be english, chinese, or auto.");
+}
+
+function headerValue(event: RestRequest, name: string): string | undefined {
+  const headers = event.headers ?? {};
+  const target = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === target) return headers[key];
+  }
+  return undefined;
+}
+
+function requestUserId(event: RestRequest, body?: Record<string, unknown>): string | undefined {
+  return event.queryStringParameters?.userId
+    ?? headerValue(event, "x-cueflow-user-id")
+    ?? (body ? optionalString(body, "userId") : undefined);
+}
+
+function requestUserIdOrDefault(event: RestRequest, body?: Record<string, unknown>): string {
+  return requestUserId(event, body)?.trim() || DEFAULT_USER_ID;
+}
+
+async function requireOwnedConversation(
+  service: ConversationService,
+  event: RestRequest,
+  conversationId: string,
+  body?: Record<string, unknown>,
+): Promise<Conversation> {
+  const conversation = await service.getConversation(conversationId);
+  if (conversation.userId !== requestUserIdOrDefault(event, body)) {
+    throw new ConversationNotFoundError(conversationId);
+  }
+  return conversation;
+}
+
 function defaultIdFactory(): string {
   return Math.random().toString(36).slice(2, 12);
 }
@@ -141,17 +218,55 @@ export function createRestHandler(
         return noContent();
       }
 
+      if (route.method === "POST" && route.segments.length === 1 && route.segments[0] === "transcribe") {
+        if (!options.transcriber) {
+          return json(501, {
+            error: {
+              code: "TRANSCRIPTION_NOT_CONFIGURED",
+              message: "Audio transcription is not configured.",
+            },
+          });
+        }
+        const body = parseJsonBody(event);
+        const audioBase64 = requireString(body, "audioBase64", 7_500_000);
+        const mimeType = cleanString(body.mimeType, 120) || "audio/webm";
+        const language = optionalTranscriptionLanguage(body);
+        const promptContext = cleanText(body.promptContext, 2000) || undefined;
+        const result = await options.transcriber.transcribe({
+            audioBase64,
+            mimeType,
+            language,
+            promptContext,
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(JSON.stringify({
+              eventName: "cueflow.transcription_failed",
+              mimeType,
+              audioBytes: Math.floor(audioBase64.length * 0.75),
+              message,
+            }));
+            throw new ConversationServiceError("TRANSCRIPTION_FAILED", "Audio transcription failed.", 502);
+          });
+        return json(200, {
+          transcript: result.text,
+          text: result.text,
+          model: result.model,
+          language: result.language,
+        });
+      }
+
       if (route.method === "POST" && route.segments.length === 1 && route.segments[0] === "conversations") {
         const body = parseJsonBody(event);
         const conversation = await service.createConversation({
-          userId: optionalString(body, "userId"),
+          userId: requestUserId(event, body),
         });
         return json(201, { conversation });
       }
 
       if (route.method === "GET" && route.segments.length === 1 && route.segments[0] === "conversations") {
         const conversations = await service.listConversations({
-          userId: event.queryStringParameters?.userId,
+          userId: requestUserId(event),
         });
         return json(200, { conversations });
       }
@@ -159,7 +274,7 @@ export function createRestHandler(
       if (route.segments.length === 2 && route.segments[0] === "conversations") {
         const conversationId = route.segments[1];
         if (route.method === "GET") {
-          const conversation = await service.getConversation(conversationId);
+          const conversation = await requireOwnedConversation(service, event, conversationId);
           return json(200, { conversation });
         }
       }
@@ -169,14 +284,25 @@ export function createRestHandler(
         const child = route.segments[2];
 
         if (route.method === "GET" && child === "cues") {
+          await requireOwnedConversation(service, event, conversationId);
           const cues = await service.listCues(conversationId);
           return json(200, { cues });
         }
 
+        if (route.method === "GET" && child === "transcript") {
+          await requireOwnedConversation(service, event, conversationId);
+          const transcript = await service.listTranscriptChunks(conversationId);
+          return json(200, { transcript });
+        }
+
         if (route.method === "POST" && child === "end") {
           const body = parseJsonBody(event);
+          await requireOwnedConversation(service, event, conversationId, body);
           const promptContext = optionalString(body, "promptContext")?.trim() || undefined;
-          const result = await service.endConversation(conversationId, { promptContext });
+          const result = await service.endConversation(conversationId, {
+            promptContext,
+            usedPrenote: optionalUsedPrenote(body),
+          });
           const shouldEnqueueSummary = result.conversation.summaryStatus !== "READY"
             && options.summaryQueue
             && !(await options.summaryQueue.hasPendingSummaryJob(conversationId));
@@ -197,6 +323,7 @@ export function createRestHandler(
         }
 
         if (route.method === "GET" && child === "summary") {
+          await requireOwnedConversation(service, event, conversationId);
           const summary = await service.getSummary(conversationId);
           return json(200, { summary });
         }

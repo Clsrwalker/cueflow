@@ -118,12 +118,16 @@ export class WebSocketService {
   async connect(input: ConnectInput): Promise<WebSocketConnection> {
     const connectionId = requiredString(input.connectionId, "connectionId");
     const conversationId = requiredString(input.conversationId, "conversationId");
+    const userId = requiredString(input.userId, "userId");
     const conversation = await this.conversations.getConversation(conversationId);
+    if (conversation.userId !== userId) {
+      throw new WebSocketValidationError("userId must match the conversation owner.");
+    }
     const now = this.clock();
     const connection: WebSocketConnection = {
       connectionId,
       conversationId,
-      userId: input.userId?.trim() || conversation.userId,
+      userId,
       connectedAt: now.toISOString(),
       ttl: Math.floor(now.getTime() / 1000) + this.connectionTtlSeconds,
     };
@@ -160,8 +164,10 @@ export class WebSocketService {
       conversationId: chunk.conversationId,
       chunksSinceLastCue: chunksSinceLastCue(chunks, cues),
       lastCueCreatedAt: lastCueCreatedAt(cues),
+      recentCueCreatedAts: cues.map((cue) => cue.createdAt),
       now: this.nowIso(),
       pendingCueJob,
+      autoCue: validation.value.autoCue,
     });
 
     const cueJob = evaluation.shouldEnqueue

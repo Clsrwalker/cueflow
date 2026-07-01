@@ -17,6 +17,7 @@ export function createAiProviderFromEnv(env: NodeJS.ProcessEnv = process.env): A
     return new OpenAiProvider({
       apiKey: env.OPENAI_API_KEY,
       model: env.OPENAI_MODEL,
+      summaryModel: env.OPENAI_SUMMARY_MODEL,
     });
   }
   return new MockAiProvider();
