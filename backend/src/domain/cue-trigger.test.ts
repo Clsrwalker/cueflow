@@ -49,7 +49,10 @@ describe("cue trigger policy", () => {
     const result = evaluateCueTrigger({
       conversationId: "c_001",
       chunksSinceLastCue: [
-        chunk({ chunkId: "000001", text: "这个架构有什么问题应该怎么解决" }),
+        chunk({
+          chunkId: "000001",
+          text: "\u8FD9\u4E2A\u67B6\u6784\u6709\u4EC0\u4E48\u95EE\u9898\u5E94\u8BE5\u600E\u4E48\u89E3\u51B3",
+        }),
       ],
     });
 

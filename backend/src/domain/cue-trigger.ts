@@ -35,20 +35,20 @@ export const DECISION_AND_RISK_KEYWORDS = [
   "cost",
   "security",
   "reliability",
-  "问题",
-  "风险",
-  "应该",
-  "选择",
-  "建议",
-  "下一步",
-  "怎么",
-  "如何",
-  "失败",
-  "成本",
-  "安全",
-  "可靠",
-  "方案",
-  "替代",
+  "\u95EE\u9898",
+  "\u98CE\u9669",
+  "\u5E94\u8BE5",
+  "\u9009\u62E9",
+  "\u5EFA\u8BAE",
+  "\u4E0B\u4E00\u6B65",
+  "\u600E\u4E48",
+  "\u5982\u4F55",
+  "\u5931\u8D25",
+  "\u6210\u672C",
+  "\u5B89\u5168",
+  "\u53EF\u9760",
+  "\u65B9\u6848",
+  "\u66FF\u4EE3",
 ] as const;
 
 const LIVE_INTENT_KEYWORDS = [
@@ -126,14 +126,14 @@ function elapsedSinceLastCueMs(input: CueTriggerInput): number | null {
 }
 
 function hasQuestion(text: string): boolean {
-  return /[?？]/.test(text);
+  return /[?\uFF1F]/.test(text);
 }
 
 function hasSpokenQuestion(text: string): boolean {
   return /\b(what|why|how|when|where|who|which|what about|do you think|tell me|help me)\b/i.test(text)
     || /\b(can|could|would|should)\s+(we|i|you|this|that|it|there|the|our)\b/i.test(text)
     || /\b(do we|does this|is this|are we|is there|are there)\b/i.test(text)
-    || /(什么|为什么|怎么|如何|是否|是不是|有没有|能不能|能否|可以吗|可不可以|要不要|哪一个|怎么办|有什么|应该怎么|问题在哪|哪里有问题)/.test(text);
+    || /(\u4EC0\u4E48|\u4E3A\u4EC0\u4E48|\u600E\u4E48|\u5982\u4F55|\u662F\u5426|\u662F\u4E0D\u662F|\u6709\u6CA1\u6709|\u80FD\u4E0D\u80FD|\u80FD\u5426|\u53EF\u4EE5\u5417|\u53EF\u4E0D\u53EF\u4EE5|\u8981\u4E0D\u8981|\u54EA\u4E00\u4E2A|\u54EA\u91CC|\u95EE\u9898\u5728\u54EA|\u5E94\u8BE5\u600E\u4E48|\u6709\u4EC0\u4E48)/.test(text);
 }
 
 function hasLiveIntent(text: string): boolean {

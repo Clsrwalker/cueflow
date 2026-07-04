@@ -1039,7 +1039,7 @@ class ApiStack extends cdk.Stack {
     this.restApi = new apigwv2.HttpApi(this, "RestApi", {
       apiName: `cueflow-rest-${props.stage}`,
       corsPreflight: {
-        allowHeaders: ["content-type", "authorization"],
+        allowHeaders: ["content-type", "authorization", "x-cueflow-user-id"],
         allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.OPTIONS],
         allowOrigins: ["*"],
         maxAge: cdk.Duration.hours(1),
@@ -1050,6 +1050,7 @@ class ApiStack extends cdk.Stack {
     this.restApi.addRoutes({ path: "/transcribe", methods: [apigwv2.HttpMethod.POST], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations/{conversationId}", methods: [apigwv2.HttpMethod.GET], integration: restIntegration });
+    this.restApi.addRoutes({ path: "/conversations/{conversationId}/transcript", methods: [apigwv2.HttpMethod.GET], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations/{conversationId}/cues", methods: [apigwv2.HttpMethod.GET], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations/{conversationId}/end", methods: [apigwv2.HttpMethod.POST], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations/{conversationId}/summary", methods: [apigwv2.HttpMethod.GET], integration: restIntegration });
