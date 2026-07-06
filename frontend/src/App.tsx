@@ -178,45 +178,11 @@ type LoginForm = {
   confirmPassword: string;
 };
 
-type SpeechRecognitionResultLike = {
-  isFinal: boolean;
-  0?: {
-    transcript?: string;
-  };
-};
-
-type SpeechRecognitionEventLike = {
-  resultIndex: number;
-  results: {
-    length: number;
-    [index: number]: SpeechRecognitionResultLike;
-  };
-};
-
-type SpeechRecognitionErrorLike = {
-  error: string;
-};
-
-type SpeechRecognitionLike = {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  start: () => void;
-  stop: () => void;
-  abort: () => void;
-  onstart: (() => void) | null;
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((event: SpeechRecognitionErrorLike) => void) | null;
-  onend: (() => void) | null;
-};
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-
 const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["decision", "risk", "action", "concept", "summary"];
 const AUTH_STORAGE_KEY = "cueflow.authUser";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "cueflow.activeConversation";
-const CLOUD_STT_SEGMENT_MS = 3200;
+const CLOUD_STT_SEGMENT_MS = 6000;
 const MIN_AUDIO_BLOB_BYTES = 1200;
 const TRANSCRIPT_DUPLICATE_LOOKBACK = 4;
 const CUE_TITLE_MAX_CHARS = 34;
@@ -354,14 +320,6 @@ function userInitials(user: Pick<AuthUser, "name" | "email">): string {
   const parts = source.split(/\s+/).filter(Boolean);
   if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
   return source.slice(0, 2).toUpperCase();
-}
-
-function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
-  const browserWindow = window as Window & {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  };
-  return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition ?? null;
 }
 
 function canonicalTranscriptText(value: string): string {
@@ -825,7 +783,7 @@ async function transcribeAudioApi(
   runtimeConfig: RuntimeConfig,
   blob: Blob,
   settings: ConversationSettings,
-  prenote: Prenote | null,
+  _prenote: Prenote | null,
 ): Promise<string> {
   const audioBase64 = await blobToBase64(blob);
   if (!audioBase64) return "";
@@ -835,7 +793,6 @@ async function transcribeAudioApi(
       audioBase64,
       mimeType: blob.type || "audio/webm",
       language: browserAudioLanguage(settings.language),
-      ...(prenote ? { promptContext: `${prenote.title}\n${prenote.text}`.slice(0, 1600) } : {}),
     },
   });
   return cleanParagraph(data.transcript || data.text, 4000);
@@ -1272,7 +1229,6 @@ export default function App() {
     return total + Number(minutes) + Number(seconds) / 60;
   }, 0);
 
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioSegmentPartsRef = useRef<Blob[]>([]);
@@ -1504,81 +1460,9 @@ export default function App() {
       // Ignore recorder shutdown races during page unload.
     }
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-    recognitionRef.current?.abort();
     webSocketRef.current?.close();
     if (cueTimerRef.current) window.clearTimeout(cueTimerRef.current);
   }, []);
-
-  function createRecognition(): SpeechRecognitionLike | null {
-    if (!window.isSecureContext) {
-      setConnectionStatus("microphone requires https");
-      return null;
-    }
-    const Recognition = getSpeechRecognitionConstructor();
-    if (!Recognition) {
-      setConnectionStatus("speech recognition unavailable");
-      return null;
-    }
-
-    const recognition = new Recognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = settings.language === "chinese" ? "zh-CN" : settings.language === "auto" ? navigator.language : "en-US";
-
-    recognition.onstart = () => {
-      setConnectionStatus("listening");
-    };
-
-    recognition.onresult = (event) => {
-      let finalText = "";
-      let partialText = "";
-
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const text = result[0]?.transcript?.trim() ?? "";
-        if (!text) continue;
-        if (result.isFinal) finalText = `${finalText} ${text}`.trim();
-        else partialText = `${partialText} ${text}`.trim();
-      }
-
-      if (partialText) {
-        upsertPartialTranscript(partialText);
-      }
-      if (finalText) {
-        appendTranscript(finalText);
-      }
-    };
-
-    recognition.onerror = (event) => {
-      if (event.error === "no-speech") {
-        setConnectionStatus("listening");
-        return;
-      }
-      if (mediaRecorderRef.current?.state === "recording" || mediaStreamRef.current) {
-        setConnectionStatus("cloud stt listening");
-        return;
-      }
-      shouldListenRef.current = false;
-      setIsListening(false);
-      setConnectionStatus(event.error === "not-allowed" || event.error === "service-not-allowed"
-        ? "microphone blocked"
-        : `audio error: ${event.error}`);
-    };
-
-    recognition.onend = () => {
-      const shouldRestart = shouldListenRef.current && Boolean(activeConversationIdRef.current);
-      if (!shouldRestart) return;
-      window.setTimeout(() => {
-        try {
-          recognition.start();
-        } catch {
-          setConnectionStatus("listening");
-        }
-      }, 260);
-    };
-
-    return recognition;
-  }
 
   function preferredAudioMimeType(): string {
     if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return "";
@@ -1601,7 +1485,7 @@ export default function App() {
     const conversationId = activeConversationIdRef.current;
     if (!userSnapshot || !conversationId) return;
     if (blob.size < MIN_AUDIO_BLOB_BYTES) {
-      setConnectionStatus(shouldListenRef.current ? "listening" : "paused");
+      setConnectionStatus(shouldListenRef.current ? "cloud stt listening" : "paused");
       return;
     }
     const runtimeSnapshot = runtimeConfigRef.current;
@@ -1618,7 +1502,7 @@ export default function App() {
         if (text) {
           appendTranscript(text);
         } else {
-          setConnectionStatus(shouldListenRef.current ? "listening" : "paused");
+          setConnectionStatus(shouldListenRef.current ? "cloud stt listening" : "paused");
         }
       })
       .catch((error) => {
@@ -1627,7 +1511,7 @@ export default function App() {
           if (message.includes("Payload") || message.includes("too large")) {
             setConnectionStatus("audio too large");
           } else {
-            setConnectionStatus(shouldListenRef.current ? "listening" : "transcription failed");
+            setConnectionStatus(shouldListenRef.current ? "cloud stt listening" : "transcription failed");
           }
         }
       });
@@ -1733,29 +1617,15 @@ export default function App() {
     }
   }
 
-  function startBrowserRecognition(): boolean {
-    const recognition = recognitionRef.current ?? createRecognition();
-    if (!recognition) return false;
-    recognitionRef.current = recognition;
-    shouldListenRef.current = true;
-    try {
-      recognition.start();
-      setConnectionStatus("connecting audio");
-    } catch {
-      setConnectionStatus("listening");
-    }
-    return true;
-  }
-
   async function startRecognition(): Promise<boolean> {
     shouldListenRef.current = true;
     setConnectionStatus("connecting audio");
-    const browserStarted = startBrowserRecognition();
     const cloudStarted = await startCloudTranscription();
-    if (browserStarted || cloudStarted) {
-      setConnectionStatus(browserStarted ? "listening" : "cloud stt listening");
+    if (cloudStarted) {
+      setConnectionStatus("cloud stt listening");
       return true;
     }
+    setConnectionStatus("cloud stt unavailable");
     return false;
   }
 
@@ -1788,11 +1658,6 @@ export default function App() {
     }
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
-    try {
-      recognitionRef.current?.stop();
-    } catch {
-      recognitionRef.current?.abort();
-    }
     setConnectionStatus(nextStatus);
     return recorderStopped;
   }
@@ -1937,18 +1802,6 @@ export default function App() {
     };
     socket.send(JSON.stringify(message));
     setConnectionStatus("transcript sent");
-  }
-
-  function upsertPartialTranscript(text: string) {
-    const conversationId = activeConversationIdRef.current;
-    if (!conversationId) return;
-    const time = elapsedLabel(elapsedSecondsRef.current);
-    setTranscript((current) => {
-      const withoutPartial = current.filter((line) => !line.partial);
-      const next = [...withoutPartial, { id: "partial", time, text, partial: true }];
-      transcriptRef.current = next;
-      return next;
-    });
   }
 
   function appendTranscript(text: string) {

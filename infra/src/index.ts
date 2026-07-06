@@ -1001,7 +1001,7 @@ class ApiStack extends cdk.Stack {
       OPENAI_SECRET_ID: props.openAiSecretId ?? `cueflow/${props.stage}/openai-api-key`,
       OPENAI_MODEL: process.env.OPENAI_MODEL ?? "gpt-5.4-nano",
       OPENAI_SUMMARY_MODEL: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-5.4-mini",
-      OPENAI_TRANSCRIPTION_MODEL: process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe",
+      OPENAI_TRANSCRIPTION_MODEL: process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-transcribe",
       NODE_OPTIONS: "--enable-source-maps",
     };
 

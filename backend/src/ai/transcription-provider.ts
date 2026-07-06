@@ -1,6 +1,6 @@
 import OpenAI, { toFile } from "openai";
 
-export const DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
+export const DEFAULT_OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-transcribe";
 
 export type TranscriptionLanguage = "english" | "chinese" | "auto";
 
