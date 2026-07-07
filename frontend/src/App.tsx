@@ -182,7 +182,7 @@ const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["decision", "risk", "action", "concept", "summary"];
 const AUTH_STORAGE_KEY = "cueflow.authUser";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "cueflow.activeConversation";
-const CLOUD_STT_SEGMENT_MS = 6000;
+const CLOUD_STT_SEGMENT_MS = 4500;
 const MIN_AUDIO_BLOB_BYTES = 1200;
 const TRANSCRIPT_DUPLICATE_LOOKBACK = 4;
 const CUE_TITLE_MAX_CHARS = 34;
@@ -1231,8 +1231,6 @@ export default function App() {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-  const audioSegmentPartsRef = useRef<Blob[]>([]);
-  const recordingSegmentTimerRef = useRef<number | null>(null);
   const recorderStopResolversRef = useRef<Array<() => void>>([]);
   const transcriptionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const webSocketRef = useRef<WebSocket | null>(null);
@@ -1448,10 +1446,6 @@ export default function App() {
 
   useEffect(() => () => {
     shouldListenRef.current = false;
-    if (recordingSegmentTimerRef.current) {
-      window.clearTimeout(recordingSegmentTimerRef.current);
-      recordingSegmentTimerRef.current = null;
-    }
     try {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.stop();
@@ -1472,12 +1466,6 @@ export default function App() {
       "audio/mp4",
       "audio/ogg;codecs=opus",
     ].find((type) => MediaRecorder.isTypeSupported(type)) || "";
-  }
-
-  function clearRecordingSegmentTimer() {
-    if (!recordingSegmentTimerRef.current) return;
-    window.clearTimeout(recordingSegmentTimerRef.current);
-    recordingSegmentTimerRef.current = null;
   }
 
   function queueAudioTranscription(blob: Blob) {
@@ -1524,55 +1512,27 @@ export default function App() {
     try {
       const mimeType = preferredAudioMimeType();
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-      audioSegmentPartsRef.current = [];
       mediaRecorderRef.current = recorder;
 
       recorder.onstart = () => {
-        setConnectionStatus("cloud stt listening");
+        setConnectionStatus("cloud stt recording");
       };
       recorder.ondataavailable = (event) => {
-        if (event.data?.size) audioSegmentPartsRef.current.push(event.data);
+        if (!event.data?.size) return;
+        const type = recorder.mimeType || event.data.type || mimeType || "audio/webm";
+        queueAudioTranscription(new Blob([event.data], { type }));
       };
       recorder.onerror = () => {
-        clearRecordingSegmentTimer();
         setConnectionStatus("cloud stt error");
       };
       recorder.onstop = () => {
-        clearRecordingSegmentTimer();
         if (mediaRecorderRef.current === recorder) mediaRecorderRef.current = null;
-        const parts = audioSegmentPartsRef.current;
-        audioSegmentPartsRef.current = [];
-        if (parts.length) {
-          const type = recorder.mimeType || parts[0]?.type || mimeType || "audio/webm";
-          queueAudioTranscription(new Blob(parts, { type }));
-        }
-        if (shouldListenRef.current && activeConversationIdRef.current && mediaStreamRef.current === stream) {
-          window.setTimeout(() => {
-            if (shouldListenRef.current && activeConversationIdRef.current && mediaStreamRef.current === stream) {
-              startRecordingSegment(stream);
-            }
-          }, 80);
-        }
         const resolvers = recorderStopResolversRef.current.splice(0);
         resolvers.forEach((resolve) => resolve());
       };
 
-      recorder.start();
-      recordingSegmentTimerRef.current = window.setTimeout(() => {
-        if (recorder.state === "recording") {
-          try {
-            recorder.requestData();
-          } catch {
-            // stop() will still emit the available data in most browsers.
-          }
-          try {
-            recorder.stop();
-          } catch {
-            clearRecordingSegmentTimer();
-          }
-        }
-      }, CLOUD_STT_SEGMENT_MS);
-      setConnectionStatus("cloud stt listening");
+      recorder.start(CLOUD_STT_SEGMENT_MS);
+      setConnectionStatus("cloud stt recording");
       return true;
     } catch {
       setConnectionStatus("cloud stt unavailable");
@@ -1631,7 +1591,6 @@ export default function App() {
 
   function stopRecognition(nextStatus = "paused"): Promise<void> {
     shouldListenRef.current = false;
-    clearRecordingSegmentTimer();
     const recorder = mediaRecorderRef.current;
     let recorderStopped: Promise<void> = Promise.resolve();
     if (recorder && recorder.state !== "inactive") {
@@ -1651,7 +1610,6 @@ export default function App() {
       } catch {
         // The stream cleanup below still releases the microphone.
         mediaRecorderRef.current = null;
-        audioSegmentPartsRef.current = [];
         const resolvers = recorderStopResolversRef.current.splice(0);
         resolvers.forEach((resolve) => resolve());
       }
