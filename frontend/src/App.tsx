@@ -143,6 +143,13 @@ type TranscriptionApiJson = {
   language?: SpeechLanguage;
 };
 
+type RealtimeClientSecretJson = {
+  clientSecret?: string;
+  model?: string;
+  delay?: string;
+  language?: SpeechLanguage;
+};
+
 type PrenoteApiJson = {
   id?: string;
   title?: string;
@@ -182,6 +189,7 @@ const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["decision", "risk", "action", "concept", "summary"];
 const AUTH_STORAGE_KEY = "cueflow.authUser";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "cueflow.activeConversation";
+const REALTIME_TRANSCRIPT_COMMIT_MS = 2200;
 const CLOUD_STT_SEGMENT_MS = 4500;
 const MIN_AUDIO_BLOB_BYTES = 1200;
 const TRANSCRIPT_DUPLICATE_LOOKBACK = 4;
@@ -798,6 +806,22 @@ async function transcribeAudioApi(
   return cleanParagraph(data.transcript || data.text, 4000);
 }
 
+async function realtimeClientSecretApi(
+  user: AuthUser,
+  runtimeConfig: RuntimeConfig,
+  settings: ConversationSettings,
+): Promise<string> {
+  const data = await requestConversationApi<RealtimeClientSecretJson>("/realtime/client-secret", user, runtimeConfig, {
+    method: "POST",
+    body: {
+      language: settings.language,
+    },
+  });
+  const clientSecret = cleanOneLine(data.clientSecret, 1200);
+  if (!clientSecret) throw new Error("Realtime transcription session was invalid.");
+  return clientSecret;
+}
+
 function transcriptText(lines: TranscriptLine[]): string {
   return lines.map((line) => `[${line.time}] ${line.text}`).join("\n").trim();
 }
@@ -1231,6 +1255,10 @@ export default function App() {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const realtimePeerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
+  const realtimeTranscriptDraftsRef = useRef<Record<string, string>>({});
+  const realtimeCommitTimerRef = useRef<number | null>(null);
   const recorderStopResolversRef = useRef<Array<() => void>>([]);
   const transcriptionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const webSocketRef = useRef<WebSocket | null>(null);
@@ -1446,6 +1474,7 @@ export default function App() {
 
   useEffect(() => () => {
     shouldListenRef.current = false;
+    void stopRealtimeTranscription();
     try {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.stop();
@@ -1457,6 +1486,40 @@ export default function App() {
     webSocketRef.current?.close();
     if (cueTimerRef.current) window.clearTimeout(cueTimerRef.current);
   }, []);
+
+  function sendRealtimeCommit(dataChannel: RTCDataChannel | null) {
+    if (!dataChannel || dataChannel.readyState !== "open") return;
+    try {
+      dataChannel.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+    } catch {
+      // The channel can close while the microphone is being released.
+    }
+  }
+
+  async function stopRealtimeTranscription(finalize = false) {
+    if (realtimeCommitTimerRef.current) {
+      window.clearInterval(realtimeCommitTimerRef.current);
+      realtimeCommitTimerRef.current = null;
+    }
+    const dataChannel = realtimeDataChannelRef.current;
+    if (finalize) {
+      sendRealtimeCommit(dataChannel);
+      await new Promise((resolve) => window.setTimeout(resolve, 650));
+    }
+    try {
+      dataChannel?.close();
+    } catch {
+      // Ignore WebRTC shutdown races.
+    }
+    try {
+      realtimePeerConnectionRef.current?.close();
+    } catch {
+      // Ignore WebRTC shutdown races.
+    }
+    realtimeDataChannelRef.current = null;
+    realtimePeerConnectionRef.current = null;
+    realtimeTranscriptDraftsRef.current = {};
+  }
 
   function preferredAudioMimeType(): string {
     if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return "";
@@ -1503,6 +1566,122 @@ export default function App() {
           }
         }
       });
+  }
+
+  function handleRealtimeTranscriptionEvent(payload: Record<string, unknown>) {
+    const type = cleanOneLine(payload.type, 120);
+    if (type === "conversation.item.input_audio_transcription.delta") {
+      const itemId = cleanOneLine(payload.item_id, 120) || "realtime";
+      const delta = typeof payload.delta === "string" ? payload.delta : "";
+      if (!delta) return;
+      const next = `${realtimeTranscriptDraftsRef.current[itemId] || ""}${delta}`;
+      realtimeTranscriptDraftsRef.current[itemId] = next;
+      upsertPartialTranscript(next, itemId);
+      setConnectionStatus("realtime transcribing");
+      return;
+    }
+
+    if (type === "conversation.item.input_audio_transcription.completed") {
+      const itemId = cleanOneLine(payload.item_id, 120) || "realtime";
+      delete realtimeTranscriptDraftsRef.current[itemId];
+      const text = cleanParagraph(payload.transcript, 4000);
+      if (text) appendTranscript(text);
+      setConnectionStatus("realtime listening");
+      return;
+    }
+
+    if (type === "conversation.item.input_audio_transcription.failed" || type === "error") {
+      setConnectionStatus("realtime stt error");
+    }
+  }
+
+  async function startRealtimeTranscription(): Promise<boolean> {
+    const userSnapshot = authUser;
+    if (!userSnapshot) return false;
+    if (!window.isSecureContext) {
+      setConnectionStatus("microphone requires https");
+      return false;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection === "undefined") {
+      setConnectionStatus("realtime stt unavailable");
+      return false;
+    }
+    if (realtimePeerConnectionRef.current) {
+      setConnectionStatus("realtime listening");
+      return true;
+    }
+
+    let stream: MediaStream | null = null;
+    try {
+      setConnectionStatus("connecting realtime stt");
+      const clientSecret = await realtimeClientSecretApi(userSnapshot, runtimeConfigRef.current, settingsRef.current);
+      const peer = new RTCPeerConnection();
+      const dataChannel = peer.createDataChannel("oai-events");
+      realtimePeerConnectionRef.current = peer;
+      realtimeDataChannelRef.current = dataChannel;
+
+      dataChannel.onopen = () => {
+        setConnectionStatus("realtime listening");
+        realtimeCommitTimerRef.current = window.setInterval(() => {
+          if (!shouldListenRef.current) return;
+          sendRealtimeCommit(dataChannel);
+        }, REALTIME_TRANSCRIPT_COMMIT_MS);
+      };
+      dataChannel.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(String(event.data)) as Record<string, unknown>;
+          handleRealtimeTranscriptionEvent(payload);
+        } catch {
+          // Ignore malformed provider events.
+        }
+      };
+      dataChannel.onerror = () => setConnectionStatus("realtime stt error");
+
+      peer.onconnectionstatechange = () => {
+        if (peer.connectionState === "connected") setConnectionStatus("realtime listening");
+        if (peer.connectionState === "failed" || peer.connectionState === "disconnected") {
+          setConnectionStatus("realtime stt disconnected");
+        }
+      };
+
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      mediaStreamRef.current = stream;
+      for (const track of stream.getAudioTracks()) {
+        peer.addTrack(track, stream);
+      }
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        body: offer.sdp || "",
+        headers: {
+          authorization: `Bearer ${clientSecret}`,
+          "content-type": "application/sdp",
+        },
+      });
+      if (!sdpResponse.ok) {
+        throw new Error(`Realtime SDP failed (${sdpResponse.status}).`);
+      }
+      await peer.setRemoteDescription({
+        type: "answer",
+        sdp: await sdpResponse.text(),
+      });
+      setConnectionStatus("realtime listening");
+      return true;
+    } catch {
+      void stopRealtimeTranscription();
+      stream?.getTracks().forEach((track) => track.stop());
+      if (mediaStreamRef.current === stream) mediaStreamRef.current = null;
+      setConnectionStatus("realtime stt unavailable");
+      return false;
+    }
   }
 
   function startRecordingSegment(stream: MediaStream): boolean {
@@ -1579,7 +1758,13 @@ export default function App() {
 
   async function startRecognition(): Promise<boolean> {
     shouldListenRef.current = true;
-    setConnectionStatus("connecting audio");
+    setConnectionStatus("connecting realtime stt");
+    const realtimeStarted = await startRealtimeTranscription();
+    if (realtimeStarted) {
+      setConnectionStatus("realtime listening");
+      return true;
+    }
+    setConnectionStatus("cloud stt fallback");
     const cloudStarted = await startCloudTranscription();
     if (cloudStarted) {
       setConnectionStatus("cloud stt listening");
@@ -1591,6 +1776,7 @@ export default function App() {
 
   function stopRecognition(nextStatus = "paused"): Promise<void> {
     shouldListenRef.current = false;
+    const realtimeStopped = stopRealtimeTranscription(true);
     const recorder = mediaRecorderRef.current;
     let recorderStopped: Promise<void> = Promise.resolve();
     if (recorder && recorder.state !== "inactive") {
@@ -1617,7 +1803,7 @@ export default function App() {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     setConnectionStatus(nextStatus);
-    return recorderStopped;
+    return Promise.all([recorderStopped, realtimeStopped]).then(() => undefined);
   }
 
   async function refreshRecords(preferredRecordId?: string) {
@@ -1760,6 +1946,28 @@ export default function App() {
     };
     socket.send(JSON.stringify(message));
     setConnectionStatus("transcript sent");
+  }
+
+  function upsertPartialTranscript(text: string, itemId = "realtime") {
+    const conversationId = activeConversationIdRef.current;
+    if (!conversationId) return;
+    const clean = text.trim();
+    if (!clean) return;
+    const partialId = `partial-${itemId}`;
+    const time = elapsedLabel(elapsedSecondsRef.current);
+    setTranscript((current) => {
+      const next = [
+        ...current.filter((line) => line.id !== partialId),
+        {
+          id: partialId,
+          time,
+          text: clean,
+          partial: true,
+        },
+      ];
+      transcriptRef.current = next;
+      return next;
+    });
   }
 
   function appendTranscript(text: string) {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Conversation, UsedPrenote } from "@cueflow/shared";
 import type { ConversationService } from "../services/conversation-service.js";
 import {
@@ -149,6 +150,83 @@ function optionalTranscriptionLanguage(input: Record<string, unknown>): Transcri
   throw new InvalidConversationInputError("language must be english, chinese, or auto.");
 }
 
+function realtimeLanguageCode(language: TranscriptionLanguage | undefined): string | undefined {
+  if (language === "english") return "en";
+  if (language === "chinese") return "zh";
+  return undefined;
+}
+
+function safetyIdentifier(userId: string): string {
+  return createHash("sha256").update(userId).digest("hex").slice(0, 40);
+}
+
+function extractRealtimeClientSecret(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const record = payload as Record<string, unknown>;
+  if (typeof record.value === "string") return record.value;
+  const clientSecret = record.client_secret ?? record.clientSecret;
+  if (clientSecret && typeof clientSecret === "object") {
+    const value = (clientSecret as Record<string, unknown>).value;
+    if (typeof value === "string") return value;
+  }
+  return "";
+}
+
+async function createRealtimeClientSecret(event: RestRequest, body: Record<string, unknown>) {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new ConversationServiceError("OPENAI_NOT_CONFIGURED", "OpenAI realtime transcription is not configured.", 503);
+  }
+
+  const language = optionalTranscriptionLanguage(body);
+  const model = process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL?.trim() || "gpt-realtime-whisper";
+  const delay = process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY?.trim() || "low";
+  const transcription: Record<string, string> = { model, delay };
+  const code = realtimeLanguageCode(language);
+  if (code) transcription.language = code;
+
+  const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`,
+      "OpenAI-Safety-Identifier": safetyIdentifier(requestUserIdOrDefault(event, body)),
+    },
+    body: JSON.stringify({
+      session: {
+        type: "transcription",
+        audio: {
+          input: {
+            transcription,
+          },
+        },
+      },
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    console.error(JSON.stringify({
+      eventName: "cueflow.realtime_secret_failed",
+      status: response.status,
+      payload,
+    }));
+    throw new ConversationServiceError("REALTIME_SESSION_FAILED", "OpenAI realtime transcription session failed.", 502);
+  }
+
+  const clientSecret = extractRealtimeClientSecret(payload);
+  if (!clientSecret) {
+    throw new ConversationServiceError("REALTIME_SESSION_INVALID", "OpenAI realtime transcription returned an invalid session.", 502);
+  }
+
+  return {
+    clientSecret,
+    model,
+    delay,
+    language: language ?? "auto",
+  };
+}
+
 function headerValue(event: RestRequest, name: string): string | undefined {
   const headers = event.headers ?? {};
   const target = name.toLowerCase();
@@ -216,6 +294,12 @@ export function createRestHandler(
 
       if (route.method === "OPTIONS") {
         return noContent();
+      }
+
+      if (route.method === "POST" && route.segments.length === 2 && route.segments[0] === "realtime" && route.segments[1] === "client-secret") {
+        const body = parseJsonBody(event);
+        const session = await createRealtimeClientSecret(event, body);
+        return json(200, session);
       }
 
       if (route.method === "POST" && route.segments.length === 1 && route.segments[0] === "transcribe") {

@@ -943,6 +943,7 @@ function json(statusCode, payload) {
       this.httpsApi.addRoutes({ path: "/prenotes", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: prenoteApiIntegration });
       this.httpsApi.addRoutes({ path: "/prenotes/{noteId}", methods: [apigwv2.HttpMethod.PUT, apigwv2.HttpMethod.DELETE, apigwv2.HttpMethod.OPTIONS], integration: prenoteApiIntegration });
       if (restApiIntegration) {
+        this.httpsApi.addRoutes({ path: "/realtime/client-secret", methods: [apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
         this.httpsApi.addRoutes({ path: "/transcribe", methods: [apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
         this.httpsApi.addRoutes({ path: "/conversations", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
         this.httpsApi.addRoutes({ path: "/conversations/{conversationId}", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.OPTIONS], integration: restApiIntegration });
@@ -1002,6 +1003,8 @@ class ApiStack extends cdk.Stack {
       OPENAI_MODEL: process.env.OPENAI_MODEL ?? "gpt-5.4-nano",
       OPENAI_SUMMARY_MODEL: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-5.4-mini",
       OPENAI_TRANSCRIPTION_MODEL: process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-transcribe",
+      OPENAI_REALTIME_TRANSCRIPTION_MODEL: process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL ?? "gpt-realtime-whisper",
+      OPENAI_REALTIME_TRANSCRIPTION_DELAY: process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY ?? "low",
       NODE_OPTIONS: "--enable-source-maps",
     };
 
@@ -1047,6 +1050,7 @@ class ApiStack extends cdk.Stack {
     });
 
     const restIntegration = new integrations.HttpLambdaIntegration("RestIntegration", this.restHandler);
+    this.restApi.addRoutes({ path: "/realtime/client-secret", methods: [apigwv2.HttpMethod.POST], integration: restIntegration });
     this.restApi.addRoutes({ path: "/transcribe", methods: [apigwv2.HttpMethod.POST], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations", methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST], integration: restIntegration });
     this.restApi.addRoutes({ path: "/conversations/{conversationId}", methods: [apigwv2.HttpMethod.GET], integration: restIntegration });

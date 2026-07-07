@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { InMemorySummaryJobQueue } from "../queues/in-memory-summary-job-queue.js";
 import { ConversationService } from "../services/conversation-service.js";
 import { InMemoryCueFlowStore } from "../storage/in-memory-store.js";
@@ -33,6 +33,13 @@ function setup() {
 }
 
 describe("REST handler", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL;
+    delete process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY;
+  });
+
   test("creates and lists conversations", async () => {
     const { handler } = setup();
 
@@ -82,6 +89,56 @@ describe("REST handler", () => {
         promptContext: "Prepared context: Demo interview.",
       },
     ]);
+  });
+
+  test("creates OpenAI Realtime transcription client secrets server-side", async () => {
+    const { handler } = setup();
+    const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL = "gpt-realtime-whisper";
+    process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY = "low";
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      fetchCalls.push({ url, init });
+      return new Response(JSON.stringify({ value: "ek_test_realtime_secret" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const response = await handler({
+      httpMethod: "POST",
+      path: "/realtime/client-secret",
+      headers: { "x-cueflow-user-id": "student@example.com" },
+      body: JSON.stringify({ language: "english" }),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(parseBody<{ clientSecret: string; model: string; delay: string; language: string }>(response)).toEqual({
+      clientSecret: "ek_test_realtime_secret",
+      model: "gpt-realtime-whisper",
+      delay: "low",
+      language: "english",
+    });
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].url).toBe("https://api.openai.com/v1/realtime/client_secrets");
+    expect(fetchCalls[0].init.headers).toMatchObject({
+      authorization: "Bearer sk-test",
+      "OpenAI-Safety-Identifier": expect.any(String),
+    });
+    expect(JSON.parse(String(fetchCalls[0].init.body))).toEqual({
+      session: {
+        type: "transcription",
+        audio: {
+          input: {
+            transcription: {
+              model: "gpt-realtime-whisper",
+              delay: "low",
+              language: "en",
+            },
+          },
+        },
+      },
+    });
   });
 
   test("returns conversation details, cues, and final summary", async () => {
