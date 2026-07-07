@@ -193,6 +193,7 @@ const REALTIME_VOICE_THRESHOLD = 0.012;
 const REALTIME_TRANSCRIPT_SILENCE_MS = 1400;
 const REALTIME_TRANSCRIPT_MIN_SPEECH_MS = 550;
 const REALTIME_TRANSCRIPT_MAX_UTTERANCE_MS = 10000;
+const REALTIME_FALLBACK_COMMIT_MS = 8000;
 const CLOUD_STT_SEGMENT_MS = 4500;
 const MIN_AUDIO_BLOB_BYTES = 1200;
 const TRANSCRIPT_DUPLICATE_LOOKBACK = 4;
@@ -1266,6 +1267,7 @@ export default function App() {
   const realtimeSpeechStartedAtRef = useRef<number | null>(null);
   const realtimeLastVoiceAtRef = useRef<number | null>(null);
   const realtimeCommitPendingRef = useRef(false);
+  const realtimeFallbackCommitTimerRef = useRef<number | null>(null);
   const recorderStopResolversRef = useRef<Array<() => void>>([]);
   const transcriptionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const webSocketRef = useRef<WebSocket | null>(null);
@@ -1508,6 +1510,10 @@ export default function App() {
       window.cancelAnimationFrame(realtimeVadFrameRef.current);
       realtimeVadFrameRef.current = null;
     }
+    if (realtimeFallbackCommitTimerRef.current !== null) {
+      window.clearInterval(realtimeFallbackCommitTimerRef.current);
+      realtimeFallbackCommitTimerRef.current = null;
+    }
     const audioContext = realtimeAudioContextRef.current;
     realtimeAudioContextRef.current = null;
     if (audioContext && audioContext.state !== "closed") {
@@ -1516,6 +1522,18 @@ export default function App() {
     realtimeSpeechStartedAtRef.current = null;
     realtimeLastVoiceAtRef.current = null;
     realtimeCommitPendingRef.current = false;
+  }
+
+  function startRealtimeCommitFallback() {
+    if (realtimeFallbackCommitTimerRef.current !== null) return;
+    realtimeSpeechStartedAtRef.current = Date.now();
+    realtimeLastVoiceAtRef.current = Date.now();
+    realtimeFallbackCommitTimerRef.current = window.setInterval(() => {
+      if (!shouldListenRef.current) return;
+      realtimeSpeechStartedAtRef.current ||= Date.now();
+      realtimeLastVoiceAtRef.current ||= Date.now();
+      commitRealtimeUtterance("max");
+    }, REALTIME_FALLBACK_COMMIT_MS);
   }
 
   function commitRealtimeUtterance(reason: "silence" | "max" | "stop") {
@@ -1536,7 +1554,10 @@ export default function App() {
     stopRealtimeVad();
     const AudioContextCtor = window.AudioContext
       || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextCtor) return;
+    if (!AudioContextCtor) {
+      startRealtimeCommitFallback();
+      return;
+    }
 
     try {
       const audioContext = new AudioContextCtor();
@@ -1551,7 +1572,7 @@ export default function App() {
       const data = new Uint8Array(analyser.fftSize);
 
       const tick = () => {
-        if (!shouldListenRef.current || realtimeDataChannelRef.current?.readyState !== "open") return;
+        if (!shouldListenRef.current) return;
         analyser.getByteTimeDomainData(data);
         let sum = 0;
         for (const sample of data) {
@@ -1571,7 +1592,8 @@ export default function App() {
 
         const startedAt = realtimeSpeechStartedAtRef.current;
         const lastVoiceAt = realtimeLastVoiceAtRef.current;
-        if (startedAt && lastVoiceAt && !realtimeCommitPendingRef.current) {
+        const dataChannelOpen = realtimeDataChannelRef.current?.readyState === "open";
+        if (startedAt && lastVoiceAt && dataChannelOpen && !realtimeCommitPendingRef.current) {
           const speechMs = now - startedAt;
           const silenceMs = now - lastVoiceAt;
           if (speechMs >= REALTIME_TRANSCRIPT_MAX_UTTERANCE_MS) {
@@ -1587,6 +1609,7 @@ export default function App() {
       realtimeVadFrameRef.current = window.requestAnimationFrame(tick);
     } catch {
       setConnectionStatus("realtime vad unavailable");
+      startRealtimeCommitFallback();
     }
   }
 
