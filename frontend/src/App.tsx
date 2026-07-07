@@ -189,7 +189,10 @@ const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 72;
 const CUE_CATEGORY_ORDER: CueCategory[] = ["decision", "risk", "action", "concept", "summary"];
 const AUTH_STORAGE_KEY = "cueflow.authUser";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "cueflow.activeConversation";
-const REALTIME_TRANSCRIPT_COMMIT_MS = 2200;
+const REALTIME_VOICE_THRESHOLD = 0.012;
+const REALTIME_TRANSCRIPT_SILENCE_MS = 1400;
+const REALTIME_TRANSCRIPT_MIN_SPEECH_MS = 550;
+const REALTIME_TRANSCRIPT_MAX_UTTERANCE_MS = 10000;
 const CLOUD_STT_SEGMENT_MS = 4500;
 const MIN_AUDIO_BLOB_BYTES = 1200;
 const TRANSCRIPT_DUPLICATE_LOOKBACK = 4;
@@ -1258,7 +1261,11 @@ export default function App() {
   const realtimePeerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const realtimeDataChannelRef = useRef<RTCDataChannel | null>(null);
   const realtimeTranscriptDraftsRef = useRef<Record<string, string>>({});
-  const realtimeCommitTimerRef = useRef<number | null>(null);
+  const realtimeAudioContextRef = useRef<AudioContext | null>(null);
+  const realtimeVadFrameRef = useRef<number | null>(null);
+  const realtimeSpeechStartedAtRef = useRef<number | null>(null);
+  const realtimeLastVoiceAtRef = useRef<number | null>(null);
+  const realtimeCommitPendingRef = useRef(false);
   const recorderStopResolversRef = useRef<Array<() => void>>([]);
   const transcriptionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const webSocketRef = useRef<WebSocket | null>(null);
@@ -1496,16 +1503,100 @@ export default function App() {
     }
   }
 
-  async function stopRealtimeTranscription(finalize = false) {
-    if (realtimeCommitTimerRef.current) {
-      window.clearInterval(realtimeCommitTimerRef.current);
-      realtimeCommitTimerRef.current = null;
+  function stopRealtimeVad() {
+    if (realtimeVadFrameRef.current !== null) {
+      window.cancelAnimationFrame(realtimeVadFrameRef.current);
+      realtimeVadFrameRef.current = null;
     }
+    const audioContext = realtimeAudioContextRef.current;
+    realtimeAudioContextRef.current = null;
+    if (audioContext && audioContext.state !== "closed") {
+      void audioContext.close().catch(() => undefined);
+    }
+    realtimeSpeechStartedAtRef.current = null;
+    realtimeLastVoiceAtRef.current = null;
+    realtimeCommitPendingRef.current = false;
+  }
+
+  function commitRealtimeUtterance(reason: "silence" | "max" | "stop") {
+    const speechStartedAt = realtimeSpeechStartedAtRef.current;
+    const dataChannel = realtimeDataChannelRef.current;
+    if (!speechStartedAt || !dataChannel || dataChannel.readyState !== "open" || realtimeCommitPendingRef.current) return;
+    realtimeCommitPendingRef.current = true;
+    sendRealtimeCommit(dataChannel);
+    realtimeSpeechStartedAtRef.current = null;
+    realtimeLastVoiceAtRef.current = null;
+    setConnectionStatus(reason === "stop" ? "finalizing transcript" : "realtime finalizing");
+    window.setTimeout(() => {
+      realtimeCommitPendingRef.current = false;
+    }, 500);
+  }
+
+  function startRealtimeVad(stream: MediaStream) {
+    stopRealtimeVad();
+    const AudioContextCtor = window.AudioContext
+      || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return;
+
+    try {
+      const audioContext = new AudioContextCtor();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      realtimeAudioContextRef.current = audioContext;
+      if (audioContext.state === "suspended") {
+        void audioContext.resume().catch(() => undefined);
+      }
+      const data = new Uint8Array(analyser.fftSize);
+
+      const tick = () => {
+        if (!shouldListenRef.current || realtimeDataChannelRef.current?.readyState !== "open") return;
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (const sample of data) {
+          const normalized = (sample - 128) / 128;
+          sum += normalized * normalized;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        const now = Date.now();
+
+        if (rms >= REALTIME_VOICE_THRESHOLD) {
+          if (!realtimeSpeechStartedAtRef.current) {
+            realtimeSpeechStartedAtRef.current = now;
+            setConnectionStatus("realtime hearing speech");
+          }
+          realtimeLastVoiceAtRef.current = now;
+        }
+
+        const startedAt = realtimeSpeechStartedAtRef.current;
+        const lastVoiceAt = realtimeLastVoiceAtRef.current;
+        if (startedAt && lastVoiceAt && !realtimeCommitPendingRef.current) {
+          const speechMs = now - startedAt;
+          const silenceMs = now - lastVoiceAt;
+          if (speechMs >= REALTIME_TRANSCRIPT_MAX_UTTERANCE_MS) {
+            commitRealtimeUtterance("max");
+          } else if (speechMs >= REALTIME_TRANSCRIPT_MIN_SPEECH_MS && silenceMs >= REALTIME_TRANSCRIPT_SILENCE_MS) {
+            commitRealtimeUtterance("silence");
+          }
+        }
+
+        realtimeVadFrameRef.current = window.requestAnimationFrame(tick);
+      };
+
+      realtimeVadFrameRef.current = window.requestAnimationFrame(tick);
+    } catch {
+      setConnectionStatus("realtime vad unavailable");
+    }
+  }
+
+  async function stopRealtimeTranscription(finalize = false) {
     const dataChannel = realtimeDataChannelRef.current;
     if (finalize) {
-      sendRealtimeCommit(dataChannel);
+      commitRealtimeUtterance("stop");
       await new Promise((resolve) => window.setTimeout(resolve, 650));
     }
+    stopRealtimeVad();
     try {
       dataChannel?.close();
     } catch {
@@ -1620,13 +1711,7 @@ export default function App() {
       realtimePeerConnectionRef.current = peer;
       realtimeDataChannelRef.current = dataChannel;
 
-      dataChannel.onopen = () => {
-        setConnectionStatus("realtime listening");
-        realtimeCommitTimerRef.current = window.setInterval(() => {
-          if (!shouldListenRef.current) return;
-          sendRealtimeCommit(dataChannel);
-        }, REALTIME_TRANSCRIPT_COMMIT_MS);
-      };
+      dataChannel.onopen = () => setConnectionStatus("realtime listening");
       dataChannel.onmessage = (event) => {
         try {
           const payload = JSON.parse(String(event.data)) as Record<string, unknown>;
@@ -1652,6 +1737,7 @@ export default function App() {
         },
       });
       mediaStreamRef.current = stream;
+      startRealtimeVad(stream);
       for (const track of stream.getAudioTracks()) {
         peer.addTrack(track, stream);
       }

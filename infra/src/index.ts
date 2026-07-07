@@ -1004,7 +1004,7 @@ class ApiStack extends cdk.Stack {
       OPENAI_SUMMARY_MODEL: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-5.4-mini",
       OPENAI_TRANSCRIPTION_MODEL: process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-transcribe",
       OPENAI_REALTIME_TRANSCRIPTION_MODEL: process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL ?? "gpt-realtime-whisper",
-      OPENAI_REALTIME_TRANSCRIPTION_DELAY: process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY ?? "low",
+      OPENAI_REALTIME_TRANSCRIPTION_DELAY: process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY ?? "medium",
       NODE_OPTIONS: "--enable-source-maps",
     };
 

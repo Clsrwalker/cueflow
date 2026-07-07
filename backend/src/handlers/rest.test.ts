@@ -96,7 +96,7 @@ describe("REST handler", () => {
     const fetchCalls: Array<{ url: string; init: RequestInit }> = [];
     process.env.OPENAI_API_KEY = "sk-test";
     process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL = "gpt-realtime-whisper";
-    process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY = "low";
+    process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY = "medium";
     vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
       fetchCalls.push({ url, init });
       return new Response(JSON.stringify({ value: "ek_test_realtime_secret" }), {
@@ -116,7 +116,7 @@ describe("REST handler", () => {
     expect(parseBody<{ clientSecret: string; model: string; delay: string; language: string }>(response)).toEqual({
       clientSecret: "ek_test_realtime_secret",
       model: "gpt-realtime-whisper",
-      delay: "low",
+      delay: "medium",
       language: "english",
     });
     expect(fetchCalls).toHaveLength(1);
@@ -132,9 +132,10 @@ describe("REST handler", () => {
           input: {
             transcription: {
               model: "gpt-realtime-whisper",
-              delay: "low",
+              delay: "medium",
               language: "en",
             },
+            turn_detection: null,
           },
         },
       },

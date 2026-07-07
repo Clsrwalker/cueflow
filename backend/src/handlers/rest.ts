@@ -180,7 +180,7 @@ async function createRealtimeClientSecret(event: RestRequest, body: Record<strin
 
   const language = optionalTranscriptionLanguage(body);
   const model = process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL?.trim() || "gpt-realtime-whisper";
-  const delay = process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY?.trim() || "low";
+  const delay = process.env.OPENAI_REALTIME_TRANSCRIPTION_DELAY?.trim() || "medium";
   const transcription: Record<string, string> = { model, delay };
   const code = realtimeLanguageCode(language);
   if (code) transcription.language = code;
@@ -198,6 +198,7 @@ async function createRealtimeClientSecret(event: RestRequest, body: Record<strin
         audio: {
           input: {
             transcription,
+            turn_detection: null,
           },
         },
       },
